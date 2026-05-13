@@ -1,11 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import {
-  Coffee, DollarSign, Plus, List, TrendingUp, Trash2,
-  Wallet, PieChart, Package, ArrowRightLeft, CreditCard, Banknote,
-  AlertTriangle, BookOpen, Flame, UserCheck, CheckCircle, Edit3, Save, Factory,
-  Download, MinusCircle, Settings, Share2, ShoppingCart, X, Calendar,
-  BarChart3, Target, Clock, Flag, Bell, ClipboardList, CheckSquare, Database
-} from 'lucide-react';
+import { Share } from '@capacitor/share';
+import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
+import { Toast as NativeToast } from '@capacitor/toast';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('ventas');
@@ -54,10 +49,12 @@ export default function App() {
 
   // --- UI TABS ---
   const getLocalTime = () => {
-    const d = new Date();
-    // Ajuste a zona horaria Colombia/Venezuela (UTC-5 / UTC-4)
-    // Para simplificar usamos la hora local del navegador que en Android suele estar bien configurada
-    return d;
+    const now = new Date();
+    // Offset para Venezuela/Colombia (UTC-4 / UTC-5)
+    // Para asegurar precisión usamos el offset manual de -4 horas para Vzla
+    const vzlaOffset = -4 * 60; // en minutos
+    const localTime = new Date(now.getTime() + (vzlaOffset + now.getTimezoneOffset()) * 60000);
+    return localTime;
   };
   
   const todayISO = getLocalTime().toISOString().split('T')[0];
@@ -154,17 +151,37 @@ export default function App() {
   // ============================================================
   //  EXPORTAR / IMPORTAR
   // ============================================================
-  const exportData = () => {
+  const exportData = async () => {
     const data = localStorage.getItem('colados_app_v6');
     if (!data) { showToast('No hay datos para exportar'); return; }
-    const blob = new Blob([data], { type: 'application/json' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href     = url;
-    a.download = `Colados_Respaldo_${formatDate(todayISO).replace(/\//g, '-')}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    showToast('¡Respaldo descargado!');
+    const fileName = `Colados_Respaldo_${formatDate(todayISO).replace(/\//g, '-')}.json`;
+    
+    try {
+      const result = await Filesystem.writeFile({
+        path: fileName,
+        data: data,
+        directory: Directory.Cache,
+        encoding: Encoding.UTF8
+      });
+      await Share.share({
+        title: 'Respaldo Colados ERP',
+        text: 'Archivo de respaldo generado por Colados App',
+        url: result.uri,
+        dialogTitle: 'Enviar o Guardar Respaldo'
+      });
+      showToast('¡Respaldo compartido!');
+    } catch (e) {
+      console.error('Error nativo:', e);
+      // Fallback a descarga web
+      const blob = new Blob([data], { type: 'application/json' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href     = url;
+      a.download = fileName;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('¡Respaldo descargado!');
+    }
   };
 
   const importData = (event) => {
@@ -195,8 +212,9 @@ export default function App() {
 
   const showToast = (msg) => {
     setToast(msg);
-    // Vibración Android (API nativa disponible en PWA/APK)
     if (navigator.vibrate) navigator.vibrate(40);
+    // Usar Toast nativo si está disponible
+    NativeToast.show({ text: msg, duration: 'short' }).catch(()=>{});
     setTimeout(() => setToast(''), 3000);
   };
 
@@ -215,52 +233,43 @@ export default function App() {
   // ============================================================
   const downloadInvoiceImage = (sale) => {
     const canvas = document.createElement('canvas');
-    canvas.width  = 400; canvas.height = 620; // Aumentado para el pie de página
+    canvas.width  = 400; canvas.height = 620;
     const ctx = canvas.getContext('2d');
 
     const logo = new Image();
-    logo.src = '/resources/icon.png'; 
-    logo.onload = () => {
+    logo.src = '/icon.png'; 
+    logo.onload = async () => {
+      // ... (Lógica de dibujo igual que antes) ...
       ctx.fillStyle = '#09090b'; ctx.fillRect(0, 0, 400, 620);
       ctx.strokeStyle = '#facc15'; ctx.lineWidth = 4; ctx.strokeRect(10, 10, 380, 600);
-
-      // Dibujar Logo
       ctx.save();
       ctx.beginPath(); ctx.arc(200, 70, 45, 0, Math.PI * 2); ctx.clip();
       ctx.drawImage(logo, 155, 25, 90, 90);
       ctx.restore();
-
       ctx.textAlign = 'center';
       ctx.fillStyle = '#facc15'; ctx.font = '900 32px sans-serif'; ctx.fillText('COLADOS', 200, 140);
       ctx.fillStyle = '#a1a1aa'; ctx.font = 'italic 13px sans-serif'; ctx.fillText('"Con el rico aroma al amanecer"', 200, 160);
-
       const dashedLine = (y) => { ctx.setLineDash([5,5]); ctx.strokeStyle='#3f3f46'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(30,y); ctx.lineTo(370,y); ctx.stroke(); ctx.setLineDash([]); };
       dashedLine(180);
-
       ctx.textAlign='left'; ctx.font='14px sans-serif'; ctx.fillStyle='#a1a1aa';
       ctx.fillText('Recibo:', 40, 210); ctx.fillText('Fecha:', 40, 240); ctx.fillText('Cliente:', 40, 270);
-
       ctx.textAlign='right'; ctx.fillStyle='#f4f4f5'; ctx.font='bold 14px sans-serif';
       ctx.fillText(`#${sale.invoiceNum || sale.id.toString().slice(-4)}`, 360, 210);
       ctx.fillText(sale.date, 360, 240);
       ctx.fillStyle='#facc15'; ctx.fillText(sale.clientName, 360, 270);
-
       dashedLine(290);
       ctx.textAlign='left'; ctx.fillStyle='#a1a1aa'; ctx.font='12px sans-serif';
       ctx.fillText('CANT.  PRODUCTO', 40, 320);
       ctx.fillStyle='#f4f4f5'; ctx.font='bold 16px sans-serif';
       ctx.fillText(`${sale.quantity||1}x  ${sale.product}`, 40, 345);
-
       dashedLine(370);
       ctx.fillStyle='#a1a1aa'; ctx.font='14px sans-serif';
       ctx.fillText('Total COP:', 40, 400); ctx.fillText('Ref USD:', 40, 430); ctx.fillText('Ref BS:', 40, 460);
-
       ctx.textAlign='right';
       ctx.fillStyle='#4ade80'; ctx.font='900 24px sans-serif'; ctx.fillText(`$${(sale.cop||0).toLocaleString('es-CO')}`, 360, 400);
       ctx.fillStyle='#f4f4f5'; ctx.font='bold 14px sans-serif';
       ctx.fillText(`USD ${(sale.usd||0).toFixed(2)}`, 360, 430);
       ctx.fillText(`Bs ${(sale.bs||0).toFixed(2)}`, 360, 460);
-
       dashedLine(485);
       ctx.fillStyle = sale.isPaid ? '#166534' : '#9a3412';
       ctx.fillRect(50, 500, 300, 34);
@@ -270,23 +279,33 @@ export default function App() {
       else if (sale.isPaid) st = `PAGADO — ${sale.method}`;
       else if (sale.paidAmount > 0) st = `ABONO $${sale.paidAmount.toLocaleString('es-CO')}`;
       ctx.fillText(st, 200, 522);
-
       ctx.fillStyle='#52525b'; ctx.font='bold 10px sans-serif';
       ctx.fillText('App hecha por Harvey Cárdenas', 200, 570);
       ctx.font='8px sans-serif';
       ctx.fillText('colados.app — offline-first ERP', 200, 585);
 
-      const a = document.createElement('a');
-      a.href     = canvas.toDataURL('image/png');
-      a.download = `Factura_Colados_${sale.invoiceNum || sale.id}.png`;
-      a.click();
-      showToast('Factura guardada.');
+      const fileName = `Factura_Colados_${sale.invoiceNum || sale.id}.png`;
+      const base64Data = canvas.toDataURL('image/png').split(',')[1];
+
+      try {
+        const result = await Filesystem.writeFile({
+          path: fileName,
+          data: base64Data,
+          directory: Directory.Cache
+        });
+        await Share.share({
+          title: 'Factura Colados',
+          url: result.uri
+        });
+      } catch (e) {
+        console.error('Error nativo:', e);
+        const a = document.createElement('a');
+        a.href     = canvas.toDataURL('image/png');
+        a.download = fileName;
+        a.click();
+      }
     };
-    logo.onerror = () => {
-      // Si el logo falla, dibujamos sin logo pero con el resto
-      showToast('Error cargando logo, generando sin él...');
-      // Re-ejecutar lógica simplificada o simplemente proceder
-    };
+    logo.onerror = () => showToast('Error cargando logo');
   };
 
   // ============================================================
@@ -995,7 +1014,7 @@ export default function App() {
             <div>
               <h1 className="text-xl font-black tracking-widest leading-none text-white">COLADOS</h1>
               <p className="text-[9px] text-zinc-400 tracking-[0.2em] mt-0.5 font-bold">BY HARVEY CÁRDENAS</p>
-              <p className="text-[9px] text-yellow-400 tracking-[0.2em] font-bold">V6.1 · OFFLINE-FIRST PWA</p>
+              <p className="text-[9px] text-yellow-400 tracking-[0.2em] font-bold">V7.0 · OFFLINE-FIRST PWA</p>
             </div>
           </div>
           <button onClick={()=>setShowSettings(true)} className="p-2 text-zinc-400 hover:text-yellow-400 bg-zinc-800 rounded-full transition-colors"><Settings size={20}/></button>
@@ -1201,7 +1220,7 @@ export default function App() {
             <div className="bg-[#09090b] border-4 border-yellow-400 rounded-2xl w-full max-w-sm p-6 shadow-[0_0_30px_rgba(250,204,21,0.2)]">
               <div className="flex justify-center mb-4">
                 <div className="w-20 h-20 bg-zinc-950 rounded-full border-2 border-yellow-400 p-1">
-                  <img src="/resources/icon.png" alt="logo" className="w-full h-full rounded-full object-cover"/>
+                  <img src="/icon.png" alt="logo" className="w-full h-full rounded-full object-cover"/>
                 </div>
               </div>
               <h2 className="text-yellow-400 text-3xl font-black tracking-widest text-center">COLADOS</h2>
