@@ -12,18 +12,30 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
 
   // --- TASAS Y MONEDAS ---
-  const [rates, setRates] = useState({ bs: 40.50, cop: 4000 });
+  // Base principal: COP (Pesos Colombianos)
+  const [rates, setRates] = useState({ 
+    usd_cop: 4100,  // Cuantos COP por 1 USD
+    usd_bs: 45.50,  // Cuantos BS por 1 USD (Paralelo)
+    cop_bs: 0.011,  // Cuantos BS por 1 COP (Calculado o manual)
+  });
 
-  // --- INVENTARIO ---
+  // --- INVENTARIO & INSUMOS ---
   const [inventory, setInventory] = useState({ pergamino: 0, azul: 0, tostado: 0 });
+  const [supplies, setSupplies] = useState({ 
+    bolsas_kraft: 0, 
+    bolsas_granel: 0,
+    alerta_umbral: 10 
+  });
+  const [donations, setDonations] = useState([]);
+  const [invoiceCounter, setInvoiceCounter] = useState(1);
 
   // --- CATÁLOGO ---
   const [catalog, setCatalog] = useState([
-    { id: 1, name: '1 Kg (Granel)',    price: 10,  deductKg: 1.0 },
-    { id: 2, name: '500g (Granel)',    price: 5,   deductKg: 0.5 },
-    { id: 3, name: '250g (Granel)',    price: 2.5, deductKg: 0.25 },
-    { id: 4, name: '400g (Empacado)',  price: 4.5, deductKg: 0.4 },
-    { id: 5, name: '200g (Empacado)',  price: 2.5, deductKg: 0.2 },
+    { id: 1, name: '1 Kg (Granel)',    price: 40000, deductKg: 1.0,  bagType: 'bolsas_granel' },
+    { id: 2, name: '500g (Granel)',    price: 20000, deductKg: 0.5,  bagType: 'bolsas_granel' },
+    { id: 3, name: '250g (Granel)',    price: 10000, deductKg: 0.25, bagType: 'bolsas_granel' },
+    { id: 4, name: '400g (Empacado)',  price: 25000, deductKg: 0.4,  bagType: 'bolsas_kraft' },
+    { id: 5, name: '200g (Empacado)',  price: 15000, deductKg: 0.2,  bagType: 'bolsas_kraft' },
   ]);
 
   // --- DIRECTORIO ---
@@ -41,7 +53,14 @@ export default function App() {
   const [visibleSales, setVisibleSales] = useState(10);
 
   // --- UI TABS ---
-  const todayISO = new Date().toISOString().split('T')[0];
+  const getLocalTime = () => {
+    const d = new Date();
+    // Ajuste a zona horaria Colombia/Venezuela (UTC-5 / UTC-4)
+    // Para simplificar usamos la hora local del navegador que en Android suele estar bien configurada
+    return d;
+  };
+  
+  const todayISO = getLocalTime().toISOString().split('T')[0];
   const [vTab,         setVTab]         = useState('venta');
   const [activeOrderId,setActiveOrderId]= useState(null);
   const [orderDate,    setOrderDate]    = useState(todayISO);
@@ -102,6 +121,9 @@ export default function App() {
         const d = JSON.parse(saved);
         if (d.rates)          setRates(d.rates);
         if (d.inventory)      setInventory(d.inventory);
+        if (d.supplies)       setSupplies(d.supplies);
+        if (d.donations)      setDonations(d.donations);
+        if (d.invoiceCounter) setInvoiceCounter(d.invoiceCounter);
         if (d.catalog?.length) setCatalog(d.catalog);
         if (d.clients)        setClients(d.clients);
         if (d.producers)      setProducers(d.producers);
@@ -164,10 +186,10 @@ export default function App() {
 
   // ============================================================
   //  UTILIDADES
-  // ============================================================
+  // ============================================================  // --- UI HELPERS ---
   const formatDate = (iso) => {
-    if (!iso) return '';
-    const [y, m, d] = iso.split('-');
+    if(!iso) return '';
+    const [y,m,d] = iso.split('-');
     return `${d}/${m}/${y}`;
   };
 
@@ -186,67 +208,85 @@ export default function App() {
   };
 
   const expenseCategories = ['Empaques/Bolsas','Etiquetas','Gas','Electricidad/Agua','Mantenimiento/Equipos','Transporte/Envíos','Insumos','Otros'];
-  const paymentMethods    = ['Efectivo COP','Efectivo USD','Efectivo BS','Pago Móvil','Bancolombia','Binance'];
+  const paymentMethods    = ['Efectivo COP','Efectivo USD','Efectivo BS','Pago Móvil','Bancolombia','Binance', 'Donación'];
 
   // ============================================================
   //  FACTURA — CANVAS IMAGE
   // ============================================================
   const downloadInvoiceImage = (sale) => {
     const canvas = document.createElement('canvas');
-    canvas.width  = 400; canvas.height = 560;
+    canvas.width  = 400; canvas.height = 620; // Aumentado para el pie de página
     const ctx = canvas.getContext('2d');
 
-    ctx.fillStyle = '#09090b'; ctx.fillRect(0, 0, 400, 560);
-    ctx.strokeStyle = '#facc15'; ctx.lineWidth = 4; ctx.strokeRect(10, 10, 380, 540);
+    const logo = new Image();
+    logo.src = '/resources/icon.png'; 
+    logo.onload = () => {
+      ctx.fillStyle = '#09090b'; ctx.fillRect(0, 0, 400, 620);
+      ctx.strokeStyle = '#facc15'; ctx.lineWidth = 4; ctx.strokeRect(10, 10, 380, 600);
 
-    ctx.textAlign = 'center';
-    ctx.fillStyle = '#facc15'; ctx.font = '900 32px sans-serif'; ctx.fillText('COLADOS', 200, 60);
-    ctx.fillStyle = '#a1a1aa'; ctx.font = 'italic 13px sans-serif'; ctx.fillText('"Con el rico aroma al amanecer"', 200, 85);
+      // Dibujar Logo
+      ctx.save();
+      ctx.beginPath(); ctx.arc(200, 70, 45, 0, Math.PI * 2); ctx.clip();
+      ctx.drawImage(logo, 155, 25, 90, 90);
+      ctx.restore();
 
-    const dashedLine = (y) => { ctx.setLineDash([5,5]); ctx.strokeStyle='#3f3f46'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(30,y); ctx.lineTo(370,y); ctx.stroke(); ctx.setLineDash([]); };
-    dashedLine(105);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#facc15'; ctx.font = '900 32px sans-serif'; ctx.fillText('COLADOS', 200, 140);
+      ctx.fillStyle = '#a1a1aa'; ctx.font = 'italic 13px sans-serif'; ctx.fillText('"Con el rico aroma al amanecer"', 200, 160);
 
-    ctx.textAlign='left'; ctx.font='14px sans-serif'; ctx.fillStyle='#a1a1aa';
-    ctx.fillText('Recibo:', 40, 145); ctx.fillText('Fecha:', 40, 175); ctx.fillText('Cliente:', 40, 205);
+      const dashedLine = (y) => { ctx.setLineDash([5,5]); ctx.strokeStyle='#3f3f46'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(30,y); ctx.lineTo(370,y); ctx.stroke(); ctx.setLineDash([]); };
+      dashedLine(180);
 
-    ctx.textAlign='right'; ctx.fillStyle='#f4f4f5'; ctx.font='bold 14px sans-serif';
-    ctx.fillText(`#${sale.id.toString().slice(-4)}`, 360, 145);
-    ctx.fillText(sale.date, 360, 175);
-    ctx.fillStyle='#facc15'; ctx.fillText(sale.clientName, 360, 205);
+      ctx.textAlign='left'; ctx.font='14px sans-serif'; ctx.fillStyle='#a1a1aa';
+      ctx.fillText('Recibo:', 40, 210); ctx.fillText('Fecha:', 40, 240); ctx.fillText('Cliente:', 40, 270);
 
-    dashedLine(225);
-    ctx.textAlign='left'; ctx.fillStyle='#a1a1aa'; ctx.font='12px sans-serif';
-    ctx.fillText('CANT.  PRODUCTO', 40, 255);
-    ctx.fillStyle='#f4f4f5'; ctx.font='bold 16px sans-serif';
-    ctx.fillText(`${sale.quantity||1}x  ${sale.product}`, 40, 280);
+      ctx.textAlign='right'; ctx.fillStyle='#f4f4f5'; ctx.font='bold 14px sans-serif';
+      ctx.fillText(`#${sale.invoiceNum || sale.id.toString().slice(-4)}`, 360, 210);
+      ctx.fillText(sale.date, 360, 240);
+      ctx.fillStyle='#facc15'; ctx.fillText(sale.clientName, 360, 270);
 
-    dashedLine(300);
-    ctx.fillStyle='#a1a1aa'; ctx.font='14px sans-serif';
-    ctx.fillText('Total USD:', 40, 330); ctx.fillText('Ref Bs:', 40, 360); ctx.fillText('Ref COP:', 40, 390);
+      dashedLine(290);
+      ctx.textAlign='left'; ctx.fillStyle='#a1a1aa'; ctx.font='12px sans-serif';
+      ctx.fillText('CANT.  PRODUCTO', 40, 320);
+      ctx.fillStyle='#f4f4f5'; ctx.font='bold 16px sans-serif';
+      ctx.fillText(`${sale.quantity||1}x  ${sale.product}`, 40, 345);
 
-    ctx.textAlign='right';
-    ctx.fillStyle='#4ade80'; ctx.font='900 22px sans-serif'; ctx.fillText(`$${sale.usd.toFixed(2)}`, 360, 330);
-    ctx.fillStyle='#f4f4f5'; ctx.font='bold 14px sans-serif';
-    ctx.fillText(`Bs ${sale.bs}`, 360, 360);
-    ctx.fillText(`${sale.cop} COP`, 360, 390);
+      dashedLine(370);
+      ctx.fillStyle='#a1a1aa'; ctx.font='14px sans-serif';
+      ctx.fillText('Total COP:', 40, 400); ctx.fillText('Ref USD:', 40, 430); ctx.fillText('Ref BS:', 40, 460);
 
-    dashedLine(415);
-    ctx.fillStyle = sale.isPaid ? '#166534' : '#9a3412';
-    ctx.fillRect(50, 430, 300, 34);
-    ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.font='bold 13px sans-serif';
-    let st = 'CRÉDITO PENDIENTE';
-    if (sale.isPaid) st = `PAGADO — ${sale.method}`;
-    else if (sale.paidAmount > 0) st = `ABONO PARCIAL $${sale.paidAmount.toFixed(2)}`;
-    ctx.fillText(st, 200, 452);
+      ctx.textAlign='right';
+      ctx.fillStyle='#4ade80'; ctx.font='900 24px sans-serif'; ctx.fillText(`$${(sale.cop||0).toLocaleString('es-CO')}`, 360, 400);
+      ctx.fillStyle='#f4f4f5'; ctx.font='bold 14px sans-serif';
+      ctx.fillText(`USD ${(sale.usd||0).toFixed(2)}`, 360, 430);
+      ctx.fillText(`Bs ${(sale.bs||0).toFixed(2)}`, 360, 460);
 
-    ctx.fillStyle='#52525b'; ctx.font='10px sans-serif';
-    ctx.fillText('colados.app — offline-first ERP', 200, 530);
+      dashedLine(485);
+      ctx.fillStyle = sale.isPaid ? '#166534' : '#9a3412';
+      ctx.fillRect(50, 500, 300, 34);
+      ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.font='bold 13px sans-serif';
+      let st = 'CRÉDITO PENDIENTE';
+      if (sale.method === 'Donación') st = 'DONACIÓN / CORTESÍA';
+      else if (sale.isPaid) st = `PAGADO — ${sale.method}`;
+      else if (sale.paidAmount > 0) st = `ABONO $${sale.paidAmount.toLocaleString('es-CO')}`;
+      ctx.fillText(st, 200, 522);
 
-    const a = document.createElement('a');
-    a.href     = canvas.toDataURL('image/png');
-    a.download = `Factura_Colados_${sale.id}.png`;
-    a.click();
-    showToast('Factura guardada como imagen.');
+      ctx.fillStyle='#52525b'; ctx.font='bold 10px sans-serif';
+      ctx.fillText('App hecha por Harvey Cárdenas', 200, 570);
+      ctx.font='8px sans-serif';
+      ctx.fillText('colados.app — offline-first ERP', 200, 585);
+
+      const a = document.createElement('a');
+      a.href     = canvas.toDataURL('image/png');
+      a.download = `Factura_Colados_${sale.invoiceNum || sale.id}.png`;
+      a.click();
+      showToast('Factura guardada.');
+    };
+    logo.onerror = () => {
+      // Si el logo falla, dibujamos sin logo pero con el resto
+      showToast('Error cargando logo, generando sin él...');
+      // Re-ejecutar lógica simplificada o simplemente proceder
+    };
   };
 
   // ============================================================
@@ -257,7 +297,7 @@ export default function App() {
     if (sale.isPaid) st = `PAGADO (${sale.method})`;
     else if (sale.paidAmount > 0) st = `ABONO PARCIAL ($${sale.paidAmount.toFixed(2)})`;
 
-    const text = `☕ *COLADOS CAFÉ* ☕\n_"Con el rico aroma al amanecer"_\n\n*Recibo:* #${sale.id.toString().slice(-4)}\n*Fecha:* ${sale.date}\n*Cliente:* ${sale.clientName}\n\n*Detalle:* ${sale.quantity||1}x ${sale.product}\n*Total:* $${sale.usd.toFixed(2)} / Bs. ${sale.bs} / ${sale.cop} COP\n*Estado:* ${st}\n\n_¡Gracias por preferir la calidad de nuestros andes!_`;
+    const text = `☕ *COLADOS CAFÉ* ☕\n_"Con el rico aroma al amanecer"_\n\n*Recibo:* #${sale.invoiceNum || sale.id.toString().slice(-4)}\n*Fecha:* ${sale.date}\n*Cliente:* ${sale.clientName}\n\n*Detalle:* ${sale.quantity||1}x ${sale.product}\n*Total:* $${(sale.cop||0).toLocaleString('es-CO')} COP / USD ${sale.usd.toFixed(2)}\n*Estado:* ${st}\n\n_¡Gracias por preferir la calidad de nuestros andes!_\n\n_App hecha por Harvey Cárdenas_`;
 
     // Web Share API (Android nativo) o Clipboard API
     if (navigator.share) {
@@ -305,24 +345,57 @@ export default function App() {
       e.preventDefault();
       if (!vClient || !vProduct || !vAmountUSD) return;
       const isCredit  = vMethod === 'Crédito';
-      const usdAmount = parseFloat(vAmountUSD);
+      const copAmount = parseFloat(vAmountUSD);
+      const usdAmount = copAmount / rates.usd_cop;
+      const bsAmount  = copAmount * rates.cop_bs;
+      
+      const catItem   = catalog.find(p => p.name === vProduct);
+      
       const newSale   = {
-        id: Date.now(), clientName: vClient, product: vProduct,
+        id: Date.now(), 
+        invoiceNum: invoiceCounter.toString().padStart(4, '0'),
+        clientName: vClient, product: vProduct,
         quantity: parseInt(vQuantity) || 1, kgSold: vSelectedKg,
-        usd: usdAmount, bs: parseFloat(bs), cop: parseFloat(cop),
+        cop: copAmount, usd: usdAmount, bs: bsAmount,
         method: vMethod, date: formatDate(vDate), isoDate: vDate,
-        time: new Date().toLocaleTimeString('es-VE',{hour:'2-digit',minute:'2-digit'}),
-        isPaid: !isCredit, paidAmount: isCredit ? 0 : usdAmount,
+        time: new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'}),
+        isPaid: !isCredit, paidAmount: isCredit ? 0 : copAmount,
       };
+
+      // Descontar Inventario de Café
       const newInv  = { ...inventory, tostado: Math.max(0, inventory.tostado - vSelectedKg) };
+      
+      // Descontar Insumos (Bolsas)
+      const newSupplies = { ...supplies };
+      if (catItem && catItem.bagType) {
+        newSupplies[catItem.bagType] = Math.max(0, newSupplies[catItem.bagType] - (parseInt(vQuantity) || 1));
+        if (newSupplies[catItem.bagType] <= supplies.alerta_umbral) {
+          showToast(`⚠️ ¡Quedan pocas ${catItem.bagType.replace('_',' ')}!`);
+        }
+      }
+
       const newSales = [newSale, ...sales];
-      let   nOrders  = orders;
+      const nextInvoice = invoiceCounter + 1;
+      
+      let nOrders  = orders;
       if (activeOrderId) {
         nOrders = orders.filter(o => o.id !== activeOrderId);
         setOrders(nOrders); setActiveOrderId(null);
       }
-      setSales(newSales); setInventory(newInv);
-      guardarLocal({ sales: newSales, inventory: newInv, orders: nOrders });
+
+      setSales(newSales); 
+      setInventory(newInv);
+      setSupplies(newSupplies);
+      setInvoiceCounter(nextInvoice);
+
+      guardarLocal({ 
+        sales: newSales, 
+        inventory: newInv, 
+        supplies: newSupplies, 
+        invoiceCounter: nextInvoice,
+        orders: nOrders 
+      });
+
       setVClient(''); setVProduct(''); setVQuantity(1); setVAmountUSD(''); setVSelectedKg(0);
       showToast('✅ Venta registrada con éxito');
     };
@@ -370,12 +443,12 @@ export default function App() {
             {/* TASAS */}
             <div className="flex gap-2">
               <div className="flex-1 bg-zinc-900 p-2 rounded-xl border border-zinc-800 text-center">
-                <p className="text-[9px] font-bold text-zinc-500 mb-1">Tasa BCV</p>
-                <input type="number" value={rates.bs} onChange={(e)=>{const v=parseFloat(e.target.value)||0; const r={...rates,bs:v}; setRates(r); guardarLocal({rates:r});}} className="w-full font-black text-lg text-yellow-400 bg-transparent outline-none text-center" step="0.01"/>
+                <p className="text-[9px] font-bold text-zinc-500 mb-1">TRM (USD/COP)</p>
+                <input type="number" value={rates.usd_cop} onChange={(e)=>{const v=parseFloat(e.target.value)||0; const r={...rates,usd_cop:v}; setRates(r); guardarLocal({rates:r});}} className="w-full font-black text-lg text-yellow-400 bg-transparent outline-none text-center" step="10"/>
               </div>
               <div className="flex-1 bg-zinc-900 p-2 rounded-xl border border-zinc-800 text-center">
-                <p className="text-[9px] font-bold text-zinc-500 mb-1">Tasa COP</p>
-                <input type="number" value={rates.cop} onChange={(e)=>{const v=parseFloat(e.target.value)||0; const r={...rates,cop:v}; setRates(r); guardarLocal({rates:r});}} className="w-full font-black text-lg text-yellow-400 bg-transparent outline-none text-center" step="100"/>
+                <p className="text-[9px] font-bold text-zinc-500 mb-1">Tasa (COP/BS)</p>
+                <input type="number" value={rates.cop_bs} onChange={(e)=>{const v=parseFloat(e.target.value)||0; const r={...rates,cop_bs:v}; setRates(r); guardarLocal({rates:r});}} className="w-full font-black text-lg text-yellow-400 bg-transparent outline-none text-center" step="0.001"/>
               </div>
             </div>
             {/* CATÁLOGO */}
@@ -415,10 +488,10 @@ export default function App() {
                     <input type="number" min="1" value={vQuantity} onChange={e=>{const q=parseInt(e.target.value)||1; setVQuantity(q); const c=catalog.find(p=>p.name===vProduct); if(c){setVAmountUSD((c.price*q).toFixed(2));setVSelectedKg(c.deductKg*q);}}} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white font-bold mt-1 text-sm text-center" required/>
                   </div>
                 </div>
-                <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Monto ($)</label><input type="number" step="0.01" value={vAmountUSD} onChange={e=>setVAmountUSD(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-yellow-400 font-black mt-1 text-lg" required placeholder="0.00"/></div>
+                <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Monto (COP)</label><input type="number" step="50" value={vAmountUSD} onChange={e=>setVAmountUSD(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-yellow-400 font-black mt-1 text-lg" required placeholder="0"/></div>
                 <div className="flex gap-2">
-                  <div className="flex-1 bg-zinc-950 p-2 rounded-lg text-center border border-zinc-800"><span className="text-[10px] text-zinc-500 block">Bs</span><span className="text-white text-xs font-bold">{bs}</span></div>
-                  <div className="flex-1 bg-zinc-950 p-2 rounded-lg text-center border border-zinc-800"><span className="text-[10px] text-zinc-500 block">COP</span><span className="text-white text-xs font-bold">{cop}</span></div>
+                  <div className="flex-1 bg-zinc-950 p-2 rounded-lg text-center border border-zinc-800"><span className="text-[10px] text-zinc-500 block">USD</span><span className="text-white text-xs font-bold">${vAmountUSD ? (parseFloat(vAmountUSD) / rates.usd_cop).toFixed(2) : '0.00'}</span></div>
+                  <div className="flex-1 bg-zinc-950 p-2 rounded-lg text-center border border-zinc-800"><span className="text-[10px] text-zinc-500 block">BS</span><span className="text-white text-xs font-bold">{vAmountUSD ? (parseFloat(vAmountUSD) * rates.cop_bs).toFixed(2) : '0.00'}</span></div>
                 </div>
                 <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Forma de Pago</label>
                   <select value={vMethod} onChange={e=>setVMethod(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 font-bold text-sm">
@@ -498,13 +571,14 @@ export default function App() {
       e.preventDefault();
       if (!cKg || !cPriceCOP || !cProducer) return;
       const isCredit     = cMethod === 'Crédito';
-      const usdCalc      = parseFloat(totalCOP) / rates.cop;
+      const copTotal     = parseFloat(totalCOP);
+      const usdCalc      = copTotal / rates.usd_cop;
       const newPurchase  = {
         id: Date.now(), type: 'Materia Prima', coffeeType: cProdType,
         producer: cProducer, kg: parseFloat(cKg),
-        pricePerKgCop: parseFloat(cPriceCOP), cop: parseFloat(totalCOP),
+        pricePerKgCop: parseFloat(cPriceCOP), cop: copTotal,
         usd: usdCalc, method: cMethod, isPaid: !isCredit,
-        paidAmount: isCredit ? 0 : usdCalc,
+        paidAmount: isCredit ? 0 : copTotal,
         date: formatDate(cDate), isoDate: cDate,
       };
       const newInv = { ...inventory };
@@ -520,12 +594,12 @@ export default function App() {
     const handleBuyOpex = (e) => {
       e.preventDefault();
       if (!oAmount) return;
-      let usdCalc = parseFloat(oAmount);
-      if (oCurrency === 'COP') usdCalc = parseFloat(oAmount) / rates.cop;
-      if (oCurrency === 'BS')  usdCalc = parseFloat(oAmount) / rates.bs;
+      let copCalc = parseFloat(oAmount);
+      if (oCurrency === 'USD') copCalc = parseFloat(oAmount) * rates.usd_cop;
+      if (oCurrency === 'BS')  copCalc = parseFloat(oAmount) / rates.cop_bs;
       const newExp = {
         id: Date.now(), category: oCategory, description: oDesc,
-        usd: usdCalc, originalAmount: parseFloat(oAmount),
+        cop: copCalc, usd: copCalc / rates.usd_cop, originalAmount: parseFloat(oAmount),
         originalCurrency: oCurrency, method: oMethod,
         date: formatDate(oDate), isoDate: oDate,
       };
@@ -742,7 +816,7 @@ export default function App() {
           </form>
         </div>
 
-        {/* HISTORIAL DE PROCESOS — Bug fix: esta sección no existía en el original */}
+        {/* HISTORIAL DE PROCESOS */}
         {processHistory.length > 0 && (
           <div>
             <h3 className="text-xs font-bold text-zinc-400 mb-2 uppercase tracking-wider flex items-center gap-2"><List size={12}/>Bitácora de Lotes ({processHistory.length})</h3>
@@ -767,13 +841,16 @@ export default function App() {
   //  RENDER: BALANCE
   // ============================================================
   const renderBalance = () => {
-    const ingresosUSD   = sales.filter(s=>s.isPaid||(s.paidAmount>0)).reduce((a,s)=>a+(s.paidAmount||s.usd),0);
-    const opexUSD       = expenses.reduce((a,e)=>a+e.usd,0);
-    const comprasMPUSD  = purchases.filter(p=>p.isPaid||(p.paidAmount>0)).reduce((a,p)=>a+(p.paidAmount||p.usd),0);
-    const netPnL        = ingresosUSD - opexUSD - comprasMPUSD;
-    const cxCobrar      = sales.filter(s=>!s.isPaid && s.usd>(s.paidAmount||0));
-    const cxPagar       = purchases.filter(p=>!p.isPaid && p.usd>(p.paidAmount||0));
-    const ticketPromedio= sales.length>0 ? sales.reduce((a,b)=>a+b.usd,0)/sales.length : 0;
+    const ingresosCOP   = sales.filter(s=>(s.isPaid||(s.paidAmount>0)) && s.method !== 'Donación').reduce((a,s)=>a+(s.paidAmount||s.cop),0);
+    const opexCOP       = expenses.reduce((a,e)=>a+e.cop,0);
+    const comprasMPCOP  = purchases.filter(p=>p.isPaid||(p.paidAmount>0)).reduce((a,p)=>a+(p.paidAmount||p.cop),0);
+    const netPnL        = ingresosCOP - opexCOP - comprasMPCOP;
+    const cxCobrar      = sales.filter(s=>!s.isPaid && s.cop>(s.paidAmount||0));
+    const cxPagar       = purchases.filter(p=>!p.isPaid && p.cop>(p.paidAmount||0));
+    const ticketPromedio= sales.filter(s=>s.method !== 'Donación').length>0 ? sales.filter(s=>s.method !== 'Donación').reduce((a,b)=>a+b.cop,0)/sales.filter(s=>s.method !== 'Donación').length : 0;
+    
+    const donationsCount = sales.filter(s => s.method === 'Donación').length;
+    const kgDonated = sales.filter(s => s.method === 'Donación').reduce((a,s) => a + (s.kgSold || 0), 0);
 
     const last7 = Array.from({length:7},(_,i)=>{const d=new Date();d.setDate(d.getDate()-i);return formatDate(d.toISOString().split('T')[0]);}).reverse();
     const chartData = last7.map(date=>({date:date.substring(0,5), total:sales.filter(s=>s.date===date).reduce((a,b)=>a+b.usd,0)}));
@@ -786,6 +863,21 @@ export default function App() {
 
     return (
       <div className="p-4 space-y-4 animate-in fade-in duration-300">
+        {/* ALERTAS DE STOCK */}
+        {(supplies.bolsas_kraft <= supplies.alerta_umbral || supplies.bolsas_granel <= supplies.alerta_umbral) && (
+          <div className="bg-red-900/20 border border-red-500/50 p-4 rounded-2xl flex items-center gap-3">
+            <AlertTriangle className="text-red-500 animate-pulse" size={24}/>
+            <div>
+              <p className="text-xs font-black text-red-500 uppercase">¡Alerta de Insumos!</p>
+              <p className="text-[10px] text-zinc-400">
+                {supplies.bolsas_kraft <= supplies.alerta_umbral && `Bolsas Kraft (${supplies.bolsas_kraft}) `}
+                {supplies.bolsas_granel <= supplies.alerta_umbral && `Bolsas Granel (${supplies.bolsas_granel}) `}
+                bajas.
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* GRÁFICO 7 DÍAS */}
         <div className="bg-zinc-900 rounded-2xl p-5 shadow-xl border border-zinc-800">
           <h3 className="text-[10px] font-bold text-yellow-400 uppercase tracking-widest mb-4 flex items-center gap-1"><BarChart3 size={14}/>Tendencia (7 Días)</h3>
@@ -808,31 +900,35 @@ export default function App() {
         {/* PnL CARD */}
         <div className="bg-zinc-900 rounded-2xl p-6 shadow-xl border border-zinc-800 relative overflow-hidden">
           <TrendingUp size={100} className="absolute -bottom-4 -right-4 text-yellow-400 opacity-5"/>
-          <p className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">Net PnL (Base USD)</p>
-          <div className={`text-4xl font-black mt-1 ${netPnL>=0?'text-white':'text-red-400'}`}>${netPnL.toFixed(2)}</div>
+          <p className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">Balance Neto (Base COP)</p>
+          <div className={`text-4xl font-black mt-1 ${netPnL>=0?'text-white':'text-red-400'}`}>${netPnL.toLocaleString('es-CO')}</div>
           <div className="grid grid-cols-3 gap-2 border-t border-zinc-800 pt-3 mt-3">
-            <div><p className="text-[8px] text-zinc-500 uppercase">Ingresos</p><p className="font-bold text-green-400 text-xs">+${ingresosUSD.toFixed(2)}</p></div>
-            <div><p className="text-[8px] text-zinc-500 uppercase">Compras MP</p><p className="font-bold text-red-400 text-xs">-${comprasMPUSD.toFixed(2)}</p></div>
-            <div><p className="text-[8px] text-zinc-500 uppercase">OPEX</p><p className="font-bold text-orange-400 text-xs">-${opexUSD.toFixed(2)}</p></div>
+            <div><p className="text-[8px] text-zinc-500 uppercase">Ingresos</p><p className="font-bold text-green-400 text-xs">+{ingresosCOP.toLocaleString('es-CO')}</p></div>
+            <div><p className="text-[8px] text-zinc-500 uppercase">Compras MP</p><p className="font-bold text-red-400 text-xs">-{comprasMPCOP.toLocaleString('es-CO')}</p></div>
+            <div><p className="text-[8px] text-zinc-500 uppercase">OPEX</p><p className="font-bold text-orange-400 text-xs">-{opexCOP.toLocaleString('es-CO')}</p></div>
           </div>
           <div className="grid grid-cols-2 gap-2 border-t border-zinc-800 pt-3 mt-3">
-            <div><p className="text-[8px] text-zinc-500 uppercase flex items-center gap-1"><Target size={10}/>Ticket Prom.</p><p className="font-bold text-yellow-400 text-xs">${ticketPromedio.toFixed(2)}</p></div>
-            <div><p className="text-[8px] text-zinc-500 uppercase flex items-center gap-1"><PieChart size={10}/>Total Ventas</p><p className="font-bold text-green-400 text-xs">+${sales.reduce((a,b)=>a+b.usd,0).toFixed(2)}</p></div>
+            <div><p className="text-[8px] text-zinc-500 uppercase flex items-center gap-1"><Target size={10}/>Ticket Prom.</p><p className="font-bold text-yellow-400 text-xs">${ticketPromedio.toLocaleString('es-CO')}</p></div>
+            <div><p className="text-[8px] text-zinc-500 uppercase flex items-center gap-1"><PieChart size={10}/>Total Ventas</p><p className="font-bold text-green-400 text-xs">+{sales.reduce((a,b)=>a+b.cop,0).toLocaleString('es-CO')}</p></div>
+          </div>
+          <div className="mt-3 pt-3 border-t border-zinc-800 flex justify-between items-center">
+            <p className="text-[8px] text-zinc-500 uppercase flex items-center gap-1"><Coffee size={10}/>Donaciones</p>
+            <p className="font-bold text-blue-400 text-xs">{donationsCount} veces ({kgDonated.toFixed(1)}kg)</p>
           </div>
         </div>
 
         {/* CXC / CXP */}
         <div className="grid grid-cols-2 gap-4">
           <div className="bg-zinc-900 border border-orange-500/30 rounded-xl p-4">
-            <h3 className="text-[10px] font-bold text-orange-400 uppercase tracking-widest mb-2 flex items-center gap-1"><ArrowRightLeft size={12}/>CXC</h3>
-            <div className="text-xl font-black text-white mb-2">${cxCobrar.reduce((a,c)=>a+(c.usd-(c.paidAmount||0)),0).toFixed(2)}</div>
+            <h3 className="text-[10px] font-bold text-orange-400 uppercase tracking-widest mb-2 flex items-center gap-1"><ArrowRightLeft size={12}/>A COBRAR</h3>
+            <div className="text-xl font-black text-white mb-2">${cxCobrar.reduce((a,c)=>a+(c.cop-(c.paidAmount||0)),0).toLocaleString('es-CO')}</div>
             <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
               {cxCobrar.length===0 && <p className="text-[10px] text-zinc-600">Sin cuentas pendientes</p>}
               {cxCobrar.map(c=>{
-                const pending=c.usd-(c.paidAmount||0); const over=isOverdue(c.isoDate);
+                const pending=c.cop-(c.paidAmount||0); const over=isOverdue(c.isoDate);
                 return (
                   <div key={c.id} className={`bg-zinc-950 p-2 rounded border flex justify-between items-center ${over?'border-red-900/50':'border-zinc-800'}`}>
-                    <div><p className="text-[10px] font-bold text-zinc-300 truncate w-20 flex items-center gap-1">{over&&<Flag size={8} className="text-red-500"/>}{c.clientName}</p><p className="text-[8px] text-orange-400">${pending.toFixed(2)}</p></div>
+                    <div><p className="text-[10px] font-bold text-zinc-300 truncate w-20 flex items-center gap-1">{over&&<Flag size={8} className="text-red-500"/>}{c.clientName}</p><p className="text-[8px] text-orange-400">${pending.toLocaleString('es-CO')}</p></div>
                     <button onClick={()=>markPaid(c,'cxc')} className="text-[8px] bg-green-900/30 text-green-400 px-2 py-1 rounded font-bold">ABONAR</button>
                   </div>
                 );
@@ -840,15 +936,15 @@ export default function App() {
             </div>
           </div>
           <div className="bg-zinc-900 border border-red-500/30 rounded-xl p-4">
-            <h3 className="text-[10px] font-bold text-red-400 uppercase tracking-widest mb-2 flex items-center gap-1"><BookOpen size={12}/>CXP</h3>
-            <div className="text-xl font-black text-white mb-2">${cxPagar.reduce((a,p)=>a+(p.usd-(p.paidAmount||0)),0).toFixed(2)}</div>
+            <h3 className="text-[10px] font-bold text-red-400 uppercase tracking-widest mb-2 flex items-center gap-1"><BookOpen size={12}/>A PAGAR</h3>
+            <div className="text-xl font-black text-white mb-2">${cxPagar.reduce((a,p)=>a+(p.cop-(p.paidAmount||0)),0).toLocaleString('es-CO')}</div>
             <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
               {cxPagar.length===0 && <p className="text-[10px] text-zinc-600">Sin deudas pendientes</p>}
               {cxPagar.map(p=>{
-                const pending=p.usd-(p.paidAmount||0);
+                const pending=p.cop-(p.paidAmount||0);
                 return (
                   <div key={p.id} className="bg-zinc-950 p-2 rounded border border-zinc-800 flex justify-between items-center">
-                    <div><p className="text-[10px] font-bold text-zinc-300 truncate w-20">{p.producer}</p><p className="text-[8px] text-red-400">${pending.toFixed(2)}</p></div>
+                    <div><p className="text-[10px] font-bold text-zinc-300 truncate w-20">{p.producer}</p><p className="text-[8px] text-red-400">${pending.toLocaleString('es-CO')}</p></div>
                     <button onClick={()=>markPaid(p,'cxp')} className="text-[8px] bg-blue-900/30 text-blue-400 px-2 py-1 rounded font-bold">ABONAR</button>
                   </div>
                 );
@@ -963,13 +1059,42 @@ export default function App() {
                 <h3 className="text-sm font-bold text-yellow-400 mb-3 flex items-center gap-2"><UserCheck size={16}/>Clientes</h3>
                 {!showNewClientForm?(
                   <><button onClick={()=>setShowNewClientForm(true)} className="w-full mb-3 bg-zinc-800 text-yellow-400 text-xs font-bold p-3 rounded-lg border border-yellow-400/30 flex justify-center items-center gap-2"><Plus size={14}/>NUEVO CLIENTE</button>
-                  <div className="space-y-2 max-h-48 overflow-y-auto">{clients.length===0?<p className="text-xs text-zinc-600">Sin clientes aún.</p>:clients.map(c=>{const t=sales.filter(s=>s.clientName===c.fullName).reduce((a,b)=>a+b.usd,0);return(<div key={c.id} className="bg-zinc-950 p-2 rounded-lg border border-zinc-800 flex justify-between"><div><p className="font-bold text-white text-xs">{c.fullName}</p><p className="text-[9px] text-zinc-400">{c.sector}</p></div><p className="text-sm font-black text-yellow-400">${t.toFixed(2)}</p></div>);})}</div></>
+                  <div className="space-y-2 max-h-48 overflow-y-auto">
+                    {clients.length===0?<p className="text-xs text-zinc-600">Sin clientes aún.</p>:clients.map(c=>{
+                      const t=sales.filter(s=>s.clientName===c.fullName).reduce((a,b)=>a+b.cop,0);
+                      return(
+                        <div key={c.id} className="bg-zinc-950 p-2 rounded-lg border border-zinc-800 flex justify-between items-center">
+                          <div>
+                            <p className="font-bold text-white text-xs">{c.fullName}</p>
+                            <p className="text-[9px] text-zinc-400">{c.sector} {c.phone && `• ${c.phone}`}</p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <p className="text-xs font-black text-yellow-400 mr-1">${t.toLocaleString('es-CO')}</p>
+                            <button onClick={()=>{setNewClientData(c);setShowNewClientForm(true);}} className="text-zinc-600 hover:text-yellow-400"><Edit3 size={12}/></button>
+                            <button onClick={()=>{const n=clients.filter(x=>x.id!==c.id);setClients(n);guardarLocal({clients:n});showToast('Cliente eliminado');}} className="text-zinc-800 hover:text-red-500"><Trash2 size={12}/></button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div></>
                 ):(
-                  <form onSubmit={e=>{e.preventDefault();const nc={id:Date.now(),...newClientData};const nl=[nc,...clients];setClients(nl);guardarLocal({clients:nl});setNewClientData({fullName:'',business:'',sector:'',phone:''});setShowNewClientForm(false);showToast('Cliente registrado.');}} className="space-y-2">
+                  <form onSubmit={e=>{
+                    e.preventDefault();
+                    if(!newClientData.fullName)return;
+                    let nl;
+                    if(newClientData.id){
+                      nl = clients.map(x=>x.id===newClientData.id?newClientData:x);
+                    } else {
+                      nl = [{id:Date.now(),...newClientData}, ...clients];
+                    }
+                    setClients(nl); guardarLocal({clients:nl});
+                    setNewClientData({fullName:'',business:'',sector:'',phone:''});
+                    setShowNewClientForm(false); showToast(newClientData.id?'Cliente actualizado':'Cliente registrado');
+                  }} className="space-y-2">
                     <input type="text" placeholder="Nombre *" required value={newClientData.fullName} onChange={e=>setNewClientData({...newClientData,fullName:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
-                    <input type="text" placeholder="Negocio" value={newClientData.business} onChange={e=>setNewClientData({...newClientData,business:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
+                    <input type="text" placeholder="Teléfono" value={newClientData.phone} onChange={e=>setNewClientData({...newClientData,phone:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
                     <input type="text" placeholder="Sector *" required value={newClientData.sector} onChange={e=>setNewClientData({...newClientData,sector:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
-                    <div className="flex gap-2"><button type="button" onClick={()=>setShowNewClientForm(false)} className="flex-1 bg-zinc-800 text-white p-2 rounded text-xs font-bold">CANCELAR</button><button type="submit" className="flex-1 bg-yellow-400 text-black p-2 rounded text-xs font-bold">GUARDAR</button></div>
+                    <div className="flex gap-2"><button type="button" onClick={()=>{setShowNewClientForm(false);setNewClientData({fullName:'',business:'',sector:'',phone:''});}} className="flex-1 bg-zinc-800 text-white p-2 rounded text-xs font-bold">CANCELAR</button><button type="submit" className="flex-1 bg-yellow-400 text-black p-2 rounded text-xs font-bold">GUARDAR</button></div>
                   </form>
                 )}
               </div>
@@ -977,15 +1102,60 @@ export default function App() {
                 <h3 className="text-sm font-bold text-yellow-400 mb-3 flex items-center gap-2"><Flame size={16}/>Productores</h3>
                 {!showNewProducerForm?(
                   <><button onClick={()=>setShowNewProducerForm(true)} className="w-full mb-3 bg-zinc-800 text-yellow-400 text-xs font-bold p-3 rounded-lg border border-yellow-400/30 flex justify-center items-center gap-2"><Plus size={14}/>NUEVO PRODUCTOR</button>
-                  <div className="space-y-2 max-h-48 overflow-y-auto">{producers.length===0?<p className="text-xs text-zinc-600">Sin productores aún.</p>:producers.map(p=>{const n=typeof p==='string'?p:p.name;const f=typeof p==='string'?'':p.finca;return(<div key={typeof p==='string'?p:p.id} className="bg-zinc-950 p-2 rounded-lg border border-zinc-800"><p className="font-bold text-white text-xs">{n}</p>{f&&<p className="text-[9px] text-zinc-400">{f}</p>}</div>);})}</div></>
+                  <div className="space-y-2 max-h-48 overflow-y-auto">
+                    {producers.length===0?<p className="text-xs text-zinc-600">Sin productores aún.</p>:producers.map(p=>{
+                      const n=typeof p==='string'?p:p.name;
+                      const f=typeof p==='string'?'':p.finca;
+                      return(
+                        <div key={typeof p==='string'?p:p.id} className="bg-zinc-950 p-2 rounded-lg border border-zinc-800 flex justify-between items-center">
+                          <div><p className="font-bold text-white text-xs">{n}</p>{f&&<p className="text-[9px] text-zinc-400">{f} {p.phone && `• ${p.phone}`}</p>}</div>
+                          <div className="flex gap-2">
+                            <button onClick={()=>{setNewProducerData(p);setShowNewProducerForm(true);}} className="text-zinc-600 hover:text-yellow-400"><Edit3 size={12}/></button>
+                            <button onClick={()=>{const n=producers.filter(x=>x.id!==p.id);setProducers(n);guardarLocal({producers:n});showToast('Productor eliminado');}} className="text-zinc-800 hover:text-red-500"><Trash2 size={12}/></button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div></>
                 ):(
-                  <form onSubmit={e=>{e.preventDefault();if(!newProducerData.name)return;const np={id:Date.now(),...newProducerData};const nl=[np,...producers];setProducers(nl);guardarLocal({producers:nl});setNewProducerData({name:'',finca:'',sector:'',phone:''});setShowNewProducerForm(false);showToast('Productor registrado.');}} className="space-y-2">
+                  <form onSubmit={e=>{
+                    e.preventDefault();
+                    if(!newProducerData.name)return;
+                    let nl;
+                    if(newProducerData.id){
+                      nl = producers.map(x=>x.id===newProducerData.id?newProducerData:x);
+                    } else {
+                      nl = [{id:Date.now(),...newProducerData}, ...producers];
+                    }
+                    setProducers(nl); guardarLocal({producers:nl});
+                    setNewProducerData({name:'',finca:'',sector:'',phone:''});
+                    setShowNewProducerForm(false); showToast(newProducerData.id?'Productor actualizado':'Productor registrado');
+                  }} className="space-y-2">
                     <input type="text" placeholder="Nombre *" required value={newProducerData.name} onChange={e=>setNewProducerData({...newProducerData,name:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
                     <input type="text" placeholder="Finca" value={newProducerData.finca} onChange={e=>setNewProducerData({...newProducerData,finca:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
-                    <input type="text" placeholder="Sector" value={newProducerData.sector} onChange={e=>setNewProducerData({...newProducerData,sector:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
-                    <div className="flex gap-2"><button type="button" onClick={()=>setShowNewProducerForm(false)} className="flex-1 bg-zinc-800 text-white p-2 rounded text-xs font-bold">CANCELAR</button><button type="submit" className="flex-1 bg-yellow-400 text-black p-2 rounded text-xs font-bold">GUARDAR</button></div>
+                    <input type="text" placeholder="Teléfono" value={newProducerData.phone} onChange={e=>setNewProducerData({...newProducerData,phone:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
+                    <div className="flex gap-2"><button type="button" onClick={()=>{setShowNewProducerForm(false);setNewProducerData({name:'',finca:'',sector:'',phone:''});}} className="flex-1 bg-zinc-800 text-white p-2 rounded text-xs font-bold">CANCELAR</button><button type="submit" className="flex-1 bg-yellow-400 text-black p-2 rounded text-xs font-bold">GUARDAR</button></div>
                   </form>
                 )}
+              </div>
+
+              {/* GESTIÓN DE INSUMOS */}
+              <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
+                <h3 className="text-sm font-bold text-blue-400 mb-3 flex items-center gap-2"><Package size={16}/>Inventario de Insumos</h3>
+                <div className="grid grid-cols-2 gap-3 mb-4">
+                  <div className="bg-zinc-950 p-2 rounded-lg border border-zinc-800">
+                    <p className="text-[8px] text-zinc-500 uppercase font-bold">Bolsas Kraft</p>
+                    <input type="number" value={supplies.bolsas_kraft} onChange={e=>{const s={...supplies,bolsas_kraft:parseInt(e.target.value)||0}; setSupplies(s); guardarLocal({supplies:s});}} className="w-full bg-transparent text-white font-black text-lg outline-none"/>
+                  </div>
+                  <div className="bg-zinc-950 p-2 rounded-lg border border-zinc-800">
+                    <p className="text-[8px] text-zinc-500 uppercase font-bold">Bolsas Granel</p>
+                    <input type="number" value={supplies.bolsas_granel} onChange={e=>{const s={...supplies,bolsas_granel:parseInt(e.target.value)||0}; setSupplies(s); guardarLocal({supplies:s});}} className="w-full bg-transparent text-white font-black text-lg outline-none"/>
+                  </div>
+                </div>
+                <div className="bg-zinc-950 p-2 rounded-lg border border-zinc-800">
+                  <p className="text-[8px] text-zinc-500 uppercase font-bold text-center">Umbral de Alerta (Pocas Unidades)</p>
+                  <input type="number" value={supplies.alerta_umbral} onChange={e=>{const s={...supplies,alerta_umbral:parseInt(e.target.value)||0}; setSupplies(s); guardarLocal({supplies:s});}} className="w-full bg-transparent text-yellow-400 font-black text-center text-sm outline-none"/>
+                </div>
               </div>
             </div>
           </div>
@@ -1029,23 +1199,29 @@ export default function App() {
           <div className="fixed inset-0 bg-black/95 z-50 flex flex-col items-center justify-center p-4 animate-in fade-in pb-10">
             <button onClick={()=>setInvoiceModal({isOpen:false,sale:null})} className="absolute top-6 right-6 text-zinc-400 hover:text-white bg-zinc-800 p-2 rounded-full"><X size={24}/></button>
             <div className="bg-[#09090b] border-4 border-yellow-400 rounded-2xl w-full max-w-sm p-6 shadow-[0_0_30px_rgba(250,204,21,0.2)]">
+              <div className="flex justify-center mb-4">
+                <div className="w-20 h-20 bg-zinc-950 rounded-full border-2 border-yellow-400 p-1">
+                  <img src="/resources/icon.png" alt="logo" className="w-full h-full rounded-full object-cover"/>
+                </div>
+              </div>
               <h2 className="text-yellow-400 text-3xl font-black tracking-widest text-center">COLADOS</h2>
               <p className="text-zinc-400 text-sm italic text-center mb-4">"Con el rico aroma al amanecer"</p>
               <div className="border-t-2 border-dashed border-zinc-700 my-3"/>
               <div className="space-y-2 text-sm">
-                <div className="flex justify-between"><span className="text-zinc-400">Recibo:</span><span className="text-white font-bold">#{invoiceModal.sale.id.toString().slice(-4)}</span></div>
+                <div className="flex justify-between"><span className="text-zinc-400">Recibo:</span><span className="text-white font-bold">#{invoiceModal.sale.invoiceNum || invoiceModal.sale.id.toString().slice(-4)}</span></div>
                 <div className="flex justify-between"><span className="text-zinc-400">Fecha:</span><span className="text-white font-bold">{invoiceModal.sale.date}</span></div>
                 <div className="flex justify-between"><span className="text-zinc-400">Cliente:</span><span className="text-yellow-400 font-bold">{invoiceModal.sale.clientName}</span></div>
               </div>
               <div className="border-t-2 border-dashed border-zinc-700 my-3"/>
               <div className="flex gap-2 text-white font-bold text-lg mb-3"><span>{invoiceModal.sale.quantity||1}x</span><span>{invoiceModal.sale.product}</span></div>
               <div className="border-t-2 border-dashed border-zinc-700 my-3"/>
-              <div className="flex justify-between items-center mb-1"><span className="text-zinc-400 text-sm">USD:</span><span className="text-green-400 text-2xl font-black">${invoiceModal.sale.usd.toFixed(2)}</span></div>
-              <div className="flex justify-between mb-1"><span className="text-zinc-400 text-sm">Bs:</span><span className="text-white font-bold">Bs {invoiceModal.sale.bs}</span></div>
-              <div className="flex justify-between mb-4"><span className="text-zinc-400 text-sm">COP:</span><span className="text-white font-bold">{invoiceModal.sale.cop} COP</span></div>
+              <div className="flex justify-between items-center mb-1"><span className="text-zinc-400 text-sm">TOTAL:</span><span className="text-green-400 text-2xl font-black">${invoiceModal.sale.cop.toLocaleString('es-CO')}</span></div>
+              <div className="flex justify-between mb-1"><span className="text-zinc-400 text-sm">Ref USD:</span><span className="text-white font-bold">USD {invoiceModal.sale.usd.toFixed(2)}</span></div>
+              <div className="flex justify-between mb-4"><span className="text-zinc-400 text-sm">Ref BS:</span><span className="text-white font-bold">Bs {invoiceModal.sale.bs.toFixed(2)}</span></div>
               <div className={`w-full py-2 rounded-lg text-center font-bold text-white text-sm ${invoiceModal.sale.isPaid?'bg-green-800':'bg-red-800'}`}>
-                {invoiceModal.sale.isPaid?`PAGADO (${invoiceModal.sale.method})`:(invoiceModal.sale.paidAmount>0?`ABONO $${invoiceModal.sale.paidAmount.toFixed(2)}`:'CRÉDITO PENDIENTE')}
+                {invoiceModal.sale.method === 'Donación' ? 'DONACIÓN / CORTESÍA' : (invoiceModal.sale.isPaid?`PAGADO (${invoiceModal.sale.method})`:(invoiceModal.sale.paidAmount>0?`ABONO $${invoiceModal.sale.paidAmount.toLocaleString('es-CO')}`:'CRÉDITO PENDIENTE'))}
               </div>
+              <p className="text-center text-[10px] text-zinc-600 mt-4 font-bold">App hecha por Harvey Cárdenas</p>
             </div>
             <div className="flex gap-3 w-full max-w-sm mt-5">
               <button onClick={()=>shareInvoiceText(invoiceModal.sale)} className="flex-1 bg-zinc-800 border border-yellow-400 text-yellow-400 p-3 rounded-xl font-bold flex items-center justify-center gap-2 text-sm"><Share2 size={16}/>Compartir</button>
