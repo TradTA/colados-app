@@ -2,6 +2,6 @@
 <resources>
     <string name="app_name">Colados</string>
     <string name="title_activity_main">Colados</string>
-    <string name="package_name">com.colados.app</string>
-    <string name="custom_url_scheme">com.colados.app</string>
+    <string name="package_name">com.colados.harvey.app</string>
+    <string name="custom_url_scheme">com.colados.harvey.app</string>
 </resources>
