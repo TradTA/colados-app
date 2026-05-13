@@ -1,4 +1,4 @@
-package com.colados.app;
+package com.colados.harvey.app;
 
 import com.getcapacitor.BridgeActivity;
 
