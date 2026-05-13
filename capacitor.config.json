@@ -8,7 +8,7 @@
   "android": {
     "allowMixedContent": true,
     "backgroundColor": "#09090b",
-    "overrideUserAgent": "Colados-App/6.1"
+    "overrideUserAgent": "Colados-App/7.0"
   },
   "plugins": {
     "SplashScreen": {
