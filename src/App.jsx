@@ -1,6 +1,16 @@
+import React, { useState, useEffect, useCallback } from 'react';
+import {
+  Coffee, DollarSign, Plus, List, TrendingUp, Trash2,
+  Wallet, PieChart, Package, ArrowRightLeft, CreditCard, Banknote,
+  AlertTriangle, BookOpen, Flame, UserCheck, CheckCircle, Edit3, Save, Factory,
+  Download, MinusCircle, Settings, Share2, ShoppingCart, X, Calendar,
+  BarChart3, Target, Clock, Flag, Bell, ClipboardList, CheckSquare, Database
+} from 'lucide-react';
 import { Share } from '@capacitor/share';
 import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
 import { Toast as NativeToast } from '@capacitor/toast';
+
+import logoImg from './assets/icon.png';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('ventas');
@@ -237,7 +247,7 @@ export default function App() {
     const ctx = canvas.getContext('2d');
 
     const logo = new Image();
-    logo.src = '/icon.png'; 
+    logo.src = logoImg; 
     logo.onload = async () => {
       // ... (Lógica de dibujo igual que antes) ...
       ctx.fillStyle = '#09090b'; ctx.fillRect(0, 0, 400, 620);
@@ -1220,7 +1230,7 @@ export default function App() {
             <div className="bg-[#09090b] border-4 border-yellow-400 rounded-2xl w-full max-w-sm p-6 shadow-[0_0_30px_rgba(250,204,21,0.2)]">
               <div className="flex justify-center mb-4">
                 <div className="w-20 h-20 bg-zinc-950 rounded-full border-2 border-yellow-400 p-1">
-                  <img src="/icon.png" alt="logo" className="w-full h-full rounded-full object-cover"/>
+                  <img src={logoImg} alt="logo" className="w-full h-full rounded-full object-cover"/>
                 </div>
               </div>
               <h2 className="text-yellow-400 text-3xl font-black tracking-widest text-center">COLADOS</h2>
