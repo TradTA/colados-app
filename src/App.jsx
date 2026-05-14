@@ -172,16 +172,10 @@ export default function App() {
       const result = await Filesystem.writeFile({
         path: fileName,
         data: data,
-        directory: Directory.Cache,
+        directory: Directory.Documents,
         encoding: Encoding.UTF8
       });
-      await Share.share({
-        title: 'Respaldo Colados ERP',
-        text: 'Archivo de respaldo generado por Colados App',
-        url: result.uri,
-        dialogTitle: 'Enviar o Guardar Respaldo'
-      });
-      showToast('¡Respaldo compartido!');
+      showToast(`¡Guardado en carpeta Documentos!\n${fileName}`);
     } catch (e) {
       console.error('Error nativo:', e);
       // Fallback a descarga web
@@ -1122,6 +1116,14 @@ export default function App() {
                     )}
                   </div>
                 ))}
+              </div>
+              <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
+                <h3 className="text-sm font-bold text-yellow-400 mb-3 flex items-center gap-2"><Package size={16}/>Insumos Rápidos</h3>
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="flex flex-col"><label className="text-[9px] text-zinc-500 uppercase">Bolsas Kraft</label><input type="number" value={supplies.bolsas_kraft} onChange={e=>{const ns={...supplies,bolsas_kraft:parseInt(e.target.value)||0}; setSupplies(ns); guardarLocal({supplies:ns});}} className="p-2 bg-zinc-950 border border-zinc-800 rounded text-white font-bold text-sm text-center"/></div>
+                  <div className="flex flex-col"><label className="text-[9px] text-zinc-500 uppercase">Bolsas Granel</label><input type="number" value={supplies.bolsas_granel} onChange={e=>{const ns={...supplies,bolsas_granel:parseInt(e.target.value)||0}; setSupplies(ns); guardarLocal({supplies:ns});}} className="p-2 bg-zinc-950 border border-zinc-800 rounded text-white font-bold text-sm text-center"/></div>
+                  <div className="flex flex-col"><label className="text-[9px] text-zinc-500 uppercase">Etiquetas</label><input type="number" value={supplies.etiquetas||0} onChange={e=>{const ns={...supplies,etiquetas:parseInt(e.target.value)||0}; setSupplies(ns); guardarLocal({supplies:ns});}} className="p-2 bg-zinc-950 border border-zinc-800 rounded text-white font-bold text-sm text-center"/></div>
+                </div>
               </div>
               <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
                 <h3 className="text-sm font-bold text-yellow-400 mb-3 flex items-center gap-2"><UserCheck size={16}/>Clientes</h3>
