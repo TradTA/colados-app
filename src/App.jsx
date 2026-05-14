@@ -10,7 +10,7 @@ import { Share } from '@capacitor/share';
 import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
 import { Toast as NativeToast } from '@capacitor/toast';
 
-import logoImg from './assets/icon.png';
+import { logoBase64 } from './assets/logoBase64';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('ventas');
@@ -29,6 +29,7 @@ export default function App() {
   const [supplies, setSupplies] = useState({ 
     bolsas_kraft: 0, 
     bolsas_granel: 0,
+    etiquetas: 0,
     alerta_umbral: 10 
   });
   const [donations, setDonations] = useState([]);
@@ -96,6 +97,7 @@ export default function App() {
   const [oAmount,   setOAmount]   = useState('');
   const [oCurrency, setOCurrency] = useState('COP');
   const [oMethod,   setOMethod]   = useState('Efectivo COP');
+  const [oIsRecurring, setOIsRecurring] = useState(false);
 
   // Fábrica
   const [fAction,       setFAction]       = useState('trilla');
@@ -247,7 +249,7 @@ export default function App() {
     const ctx = canvas.getContext('2d');
 
     const logo = new Image();
-    logo.src = logoImg; 
+    logo.src = logoBase64; 
     logo.onload = async () => {
       // ... (Lógica de dibujo igual que antes) ...
       ctx.fillStyle = '#09090b'; ctx.fillRect(0, 0, 400, 620);
@@ -398,8 +400,14 @@ export default function App() {
       const newSupplies = { ...supplies };
       if (catItem && catItem.bagType) {
         newSupplies[catItem.bagType] = Math.max(0, newSupplies[catItem.bagType] - (parseInt(vQuantity) || 1));
-        if (newSupplies[catItem.bagType] <= supplies.alerta_umbral) {
-          showToast(`⚠️ ¡Quedan pocas ${catItem.bagType.replace('_',' ')}!`);
+        
+        // Descuento de etiquetas
+        if (catItem.bagType === 'bolsas_kraft') {
+          newSupplies.etiquetas = Math.max(0, newSupplies.etiquetas - (parseInt(vQuantity) || 1));
+        }
+
+        if (newSupplies[catItem.bagType] <= supplies.alerta_umbral || newSupplies.etiquetas <= supplies.alerta_umbral) {
+          showToast(`⚠️ ¡Quedan pocas ${catItem.bagType.replace('_',' ')} o Etiquetas!`);
         }
       }
 
@@ -435,12 +443,12 @@ export default function App() {
       const newOrder = {
         id: Date.now(), clientName: vClient, product: vProduct,
         quantity: parseInt(vQuantity) || 1, date: formatDate(orderDate),
-        isoDate: orderDate, status: 'pending',
+        isoDate: orderDate, status: 'pending', isRecurring: oIsRecurring
       };
       const nOrders = [newOrder, ...orders];
       setOrders(nOrders); guardarLocal({ orders: nOrders });
-      setVClient(''); setVProduct(''); setVQuantity(1); setVAmountUSD(''); setVSelectedKg(0);
-      showToast('¡Pedido agendado!'); setVTab('venta');
+      setVClient(''); setVProduct(''); setVQuantity(1); setVAmountUSD(''); setVSelectedKg(0); setOIsRecurring(false);
+      showToast('¡Pedido agendado!'); setVTab('pedidos');
     };
 
     const dispatchOrder = (order) => {
@@ -559,6 +567,10 @@ export default function App() {
                   </div>
                   <div className="col-span-4"><label className="text-[10px] text-zinc-400 font-bold uppercase">Cant.</label><input type="number" min="1" value={vQuantity} onChange={e=>setVQuantity(parseInt(e.target.value)||1)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white font-bold mt-1 text-sm text-center" required/></div>
                 </div>
+                <div className="flex items-center gap-2 mt-2">
+                  <input type="checkbox" id="recurring" checked={oIsRecurring} onChange={(e) => setOIsRecurring(e.target.checked)} className="w-4 h-4 text-yellow-400 bg-zinc-950 border-zinc-800 rounded focus:ring-yellow-400 focus:ring-2" />
+                  <label htmlFor="recurring" className="text-xs font-bold text-zinc-300">Entregar Semanalmente</label>
+                </div>
                 <button type="submit" className="w-full bg-zinc-800 border border-yellow-400 text-yellow-400 font-black py-3 rounded-lg flex justify-center items-center gap-2 hover:bg-zinc-700 transition-colors">
                   <Save size={18}/>GUARDAR PEDIDO
                 </button>
@@ -572,12 +584,24 @@ export default function App() {
                   {orders.map(o=>(
                     <div key={o.id} className="bg-zinc-950 p-3 rounded-xl border-l-4 border-l-yellow-400 border-y border-r border-zinc-800 shadow-md">
                       <div className="flex justify-between items-start mb-2">
-                        <div><p className="font-bold text-white text-sm">{o.clientName}</p><p className="text-[10px] text-zinc-400">Para: <span className="text-yellow-400 font-bold">{o.date}</span></p></div>
+                        <div><p className="font-bold text-white text-sm flex items-center gap-2">{o.clientName} {o.isRecurring && <span className="bg-yellow-400 text-zinc-900 text-[8px] px-1 rounded uppercase">Semanal</span>}</p><p className="text-[10px] text-zinc-400">Para: <span className="text-yellow-400 font-bold">{o.date}</span></p></div>
                         <button onClick={()=>deleteOrder(o.id)} className="text-zinc-600 hover:text-red-500"><Trash2 size={14}/></button>
                       </div>
                       <div className="flex justify-between items-end border-t border-zinc-800 pt-2 mt-2">
                         <p className="font-black text-zinc-300 text-sm">{o.quantity}x {o.product}</p>
-                        <button onClick={()=>dispatchOrder(o)} className="text-[10px] bg-yellow-400 text-zinc-900 px-3 py-1.5 rounded font-black hover:bg-yellow-300">¡DESPACHAR!</button>
+                        <button onClick={()=>{
+                          dispatchOrder(o);
+                          if (o.isRecurring) {
+                            // Crear el próximo pedido para la siguiente semana
+                            const nextDate = new Date(o.isoDate);
+                            nextDate.setDate(nextDate.getDate() + 7);
+                            const nextDateStr = nextDate.toISOString().split('T')[0];
+                            const newOrder = { ...o, id: Date.now(), date: formatDate(nextDateStr), isoDate: nextDateStr };
+                            const nOrders = [newOrder, ...orders.filter(ord=>ord.id!==o.id)];
+                            setOrders(nOrders); guardarLocal({ orders: nOrders });
+                            showToast('Siguiente pedido semanal programado');
+                          }
+                        }} className="text-[10px] bg-yellow-400 text-zinc-900 px-3 py-1.5 rounded font-black hover:bg-yellow-300">¡DESPACHAR!</button>
                       </div>
                     </div>
                   ))}
@@ -785,8 +809,17 @@ export default function App() {
         if (input > newInv.azul) { showToast('⚠️ Stock insuficiente'); return; }
         newInv.azul -= input; newInv.tostado += output;
       }
+      let costPerKg = 0;
+      const lastPurchase = purchases.find(p => p.coffeeType === (fAction === 'trilla' ? 'Pergamino' : 'Azul'));
+      if (lastPurchase) costPerKg = lastPurchase.pricePerKgCop;
+      
+      const cat1kg = catalog.find(c => c.deductKg === 1) || { price: 40000 };
+      const estimatedRevenue = output * cat1kg.price;
+      const totalCost = input * costPerKg;
+      const estimatedProfit = estimatedRevenue - totalCost;
+
       const prodName = typeof producerInput === 'string' ? producerInput : producerInput.name;
-      const log = { id: Date.now(), type: fAction, producer: prodName || 'N/A', input, output, merma: currentMerma, date: formatDate(fDate) };
+      const log = { id: Date.now(), type: fAction, producer: prodName || 'N/A', input, output, merma: currentMerma, date: formatDate(fDate), estimatedProfit };
       const newHistory = [log, ...processHistory];
       setProcessHistory(newHistory); setInventory(newInv);
       guardarLocal({ inventory: newInv, processHistory: newHistory });
@@ -855,6 +888,11 @@ export default function App() {
                   <div>
                     <p className="font-bold text-zinc-200 text-xs">{log.type==='trilla'?'Trilla':'Tueste 🔥'} — {log.producer}</p>
                     <p className="text-[9px] text-zinc-500">{log.date} • {log.input}kg → {log.output}kg</p>
+                    {log.estimatedProfit !== undefined && (
+                      <p className={`text-[9px] font-bold mt-1 ${log.estimatedProfit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                        Ganancia Est: ${log.estimatedProfit.toLocaleString('es-CO')}
+                      </p>
+                    )}
                   </div>
                   <span className={`font-black text-sm ${parseFloat(log.merma)>22?'text-red-400':'text-green-400'}`}>{log.merma}%</span>
                 </div>
@@ -901,6 +939,7 @@ export default function App() {
               <p className="text-[10px] text-zinc-400">
                 {supplies.bolsas_kraft <= supplies.alerta_umbral && `Bolsas Kraft (${supplies.bolsas_kraft}) `}
                 {supplies.bolsas_granel <= supplies.alerta_umbral && `Bolsas Granel (${supplies.bolsas_granel}) `}
+                {supplies.etiquetas <= supplies.alerta_umbral && `Etiquetas (${supplies.etiquetas}) `}
                 bajas.
               </p>
             </div>
@@ -1024,7 +1063,7 @@ export default function App() {
             <div>
               <h1 className="text-xl font-black tracking-widest leading-none text-white">COLADOS</h1>
               <p className="text-[9px] text-zinc-400 tracking-[0.2em] mt-0.5 font-bold">BY HARVEY CÁRDENAS</p>
-              <p className="text-[9px] text-yellow-400 tracking-[0.2em] font-bold">V7.0 · OFFLINE-FIRST PWA</p>
+              <p className="text-[9px] text-yellow-400 tracking-[0.2em] font-bold">V7.1 · OFFLINE-FIRST PWA</p>
             </div>
           </div>
           <button onClick={()=>setShowSettings(true)} className="p-2 text-zinc-400 hover:text-yellow-400 bg-zinc-800 rounded-full transition-colors"><Settings size={20}/></button>
@@ -1095,7 +1134,7 @@ export default function App() {
                         <div key={c.id} className="bg-zinc-950 p-2 rounded-lg border border-zinc-800 flex justify-between items-center">
                           <div>
                             <p className="font-bold text-white text-xs">{c.fullName}</p>
-                            <p className="text-[9px] text-zinc-400">{c.sector} {c.phone && `• ${c.phone}`}</p>
+                            <p className="text-[9px] text-zinc-400">{c.business && `${c.business} • `}{c.sector} {c.phone && `• ${c.phone}`}</p>
                           </div>
                           <div className="flex items-center gap-2">
                             <p className="text-xs font-black text-yellow-400 mr-1">${t.toLocaleString('es-CO')}</p>
@@ -1121,8 +1160,9 @@ export default function App() {
                     setShowNewClientForm(false); showToast(newClientData.id?'Cliente actualizado':'Cliente registrado');
                   }} className="space-y-2">
                     <input type="text" placeholder="Nombre *" required value={newClientData.fullName} onChange={e=>setNewClientData({...newClientData,fullName:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
-                    <input type="text" placeholder="Teléfono" value={newClientData.phone} onChange={e=>setNewClientData({...newClientData,phone:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
+                    <input type="text" placeholder="Empresa/Local" value={newClientData.business} onChange={e=>setNewClientData({...newClientData,business:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
                     <input type="text" placeholder="Sector *" required value={newClientData.sector} onChange={e=>setNewClientData({...newClientData,sector:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
+                    <input type="text" placeholder="Teléfono" value={newClientData.phone} onChange={e=>setNewClientData({...newClientData,phone:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
                     <div className="flex gap-2"><button type="button" onClick={()=>{setShowNewClientForm(false);setNewClientData({fullName:'',business:'',sector:'',phone:''});}} className="flex-1 bg-zinc-800 text-white p-2 rounded text-xs font-bold">CANCELAR</button><button type="submit" className="flex-1 bg-yellow-400 text-black p-2 rounded text-xs font-bold">GUARDAR</button></div>
                   </form>
                 )}
@@ -1137,7 +1177,7 @@ export default function App() {
                       const f=typeof p==='string'?'':p.finca;
                       return(
                         <div key={typeof p==='string'?p:p.id} className="bg-zinc-950 p-2 rounded-lg border border-zinc-800 flex justify-between items-center">
-                          <div><p className="font-bold text-white text-xs">{n}</p>{f&&<p className="text-[9px] text-zinc-400">{f} {p.phone && `• ${p.phone}`}</p>}</div>
+                          <div><p className="font-bold text-white text-xs">{n}</p><p className="text-[9px] text-zinc-400">{f} {p.sector && `• ${p.sector}`} {p.phone && `• ${p.phone}`}</p></div>
                           <div className="flex gap-2">
                             <button onClick={()=>{setNewProducerData(p);setShowNewProducerForm(true);}} className="text-zinc-600 hover:text-yellow-400"><Edit3 size={12}/></button>
                             <button onClick={()=>{const n=producers.filter(x=>x.id!==p.id);setProducers(n);guardarLocal({producers:n});showToast('Productor eliminado');}} className="text-zinc-800 hover:text-red-500"><Trash2 size={12}/></button>
@@ -1161,7 +1201,8 @@ export default function App() {
                     setShowNewProducerForm(false); showToast(newProducerData.id?'Productor actualizado':'Productor registrado');
                   }} className="space-y-2">
                     <input type="text" placeholder="Nombre *" required value={newProducerData.name} onChange={e=>setNewProducerData({...newProducerData,name:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
-                    <input type="text" placeholder="Finca" value={newProducerData.finca} onChange={e=>setNewProducerData({...newProducerData,finca:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
+                    <input type="text" placeholder="Finca/Hacienda" value={newProducerData.finca} onChange={e=>setNewProducerData({...newProducerData,finca:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
+                    <input type="text" placeholder="Sector *" required value={newProducerData.sector} onChange={e=>setNewProducerData({...newProducerData,sector:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
                     <input type="text" placeholder="Teléfono" value={newProducerData.phone} onChange={e=>setNewProducerData({...newProducerData,phone:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
                     <div className="flex gap-2"><button type="button" onClick={()=>{setShowNewProducerForm(false);setNewProducerData({name:'',finca:'',sector:'',phone:''});}} className="flex-1 bg-zinc-800 text-white p-2 rounded text-xs font-bold">CANCELAR</button><button type="submit" className="flex-1 bg-yellow-400 text-black p-2 rounded text-xs font-bold">GUARDAR</button></div>
                   </form>
@@ -1230,7 +1271,7 @@ export default function App() {
             <div className="bg-[#09090b] border-4 border-yellow-400 rounded-2xl w-full max-w-sm p-6 shadow-[0_0_30px_rgba(250,204,21,0.2)]">
               <div className="flex justify-center mb-4">
                 <div className="w-20 h-20 bg-zinc-950 rounded-full border-2 border-yellow-400 p-1">
-                  <img src={logoImg} alt="logo" className="w-full h-full rounded-full object-cover"/>
+                  <img src={logoBase64} alt="logo" className="w-full h-full rounded-full object-cover"/>
                 </div>
               </div>
               <h2 className="text-yellow-400 text-3xl font-black tracking-widest text-center">COLADOS</h2>
