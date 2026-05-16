@@ -12,6 +12,8 @@ import { Toast as NativeToast } from '@capacitor/toast';
 
 import { logoBase64 } from './assets/logoBase64';
 
+const round2 = (n) => Math.round(n * 100) / 100;
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('ventas');
   const [showSettings, setShowSettings] = useState(false);
@@ -98,6 +100,14 @@ export default function App() {
   const [oCurrency, setOCurrency] = useState('COP');
   const [oMethod,   setOMethod]   = useState('Efectivo COP');
   const [oIsRecurring, setOIsRecurring] = useState(false);
+
+  const [filterClient, setFilterClient] = useState('');
+  const [filterProducer, setFilterProducer] = useState('');
+
+  const [vStickerType, setVStickerType] = useState('grande');
+  const [balanceSubTab, setBalanceSubTab] = useState('general');
+  const [editingSale, setEditingSale] = useState(null);
+  const [editingLog, setEditingLog] = useState(null);
 
   // Fábrica
   const [fAction,       setFAction]       = useState('trilla');
@@ -205,6 +215,20 @@ export default function App() {
       } catch { showToast('Error: Archivo de respaldo inválido'); }
     };
     reader.readAsText(file);
+  };
+
+  const exportToCSV = (data, fileName) => {
+    if (!data || data.length === 0) { showToast('No hay datos para exportar'); return; }
+    const headers = Object.keys(data[0]).join(',');
+    const rows = data.map(obj => Object.values(obj).map(v => typeof v === 'string' ? `"${v.replace(/"/g, '""')}"` : v).join(','));
+    const csvContent = "\uFEFF" + [headers, ...rows].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `${fileName}.csv`);
+    link.click();
+    showToast('Reporte CSV generado');
   };
 
   // ============================================================
@@ -340,21 +364,122 @@ export default function App() {
   //  DELETE helpers
   // ============================================================
   const deleteSale = (id) => {
-    const n = sales.filter(s => s.id !== id);
-    setSales(n); guardarLocal({ sales: n }); showToast('Venta eliminada');
+    const saleToDelete = sales.find(s => s.id === id);
+    if (saleToDelete) {
+      const totalKgToReturn = (saleToDelete.kgSold || 0) * (saleToDelete.quantity || 1);
+      const newInv = { ...inventory, tostado: round2(inventory.tostado + totalKgToReturn) };
+      
+      const catItem = catalog.find(p => p.name === saleToDelete.product);
+      const newSupplies = { ...supplies };
+      if (catItem && catItem.bagType) {
+        newSupplies[catItem.bagType] += (saleToDelete.quantity || 1);
+        if (catItem.bagType === 'bolsas_kraft') newSupplies.etiquetas += (saleToDelete.quantity || 1);
+      }
+      
+      setInventory(newInv); setSupplies(newSupplies);
+      const n = sales.filter(s => s.id !== id);
+      setSales(n);
+      guardarLocal({ sales: n, inventory: newInv, supplies: newSupplies });
+      showToast('Venta eliminada y stock devuelto');
+    }
   };
   const deleteExpense = (id) => {
     const n = expenses.filter(e => e.id !== id);
     setExpenses(n); guardarLocal({ expenses: n }); showToast('Gasto eliminado');
   };
   const deletePurchase = (id) => {
-    const n = purchases.filter(p => p.id !== id);
-    setPurchases(n); guardarLocal({ purchases: n }); showToast('Compra eliminada');
+    const pToDelete = purchases.find(p => p.id === id);
+    if (pToDelete) {
+      const newInv = { ...inventory };
+      const kgToRemove = pToDelete.kg || 0;
+      if (pToDelete.coffeeType === 'Pergamino') newInv.pergamino = round2(Math.max(0, newInv.pergamino - kgToRemove));
+      if (pToDelete.coffeeType === 'Azul')      newInv.azul      = round2(Math.max(0, newInv.azul - kgToRemove));
+      
+      setInventory(newInv);
+      const n = purchases.filter(p => p.id !== id);
+      setPurchases(n);
+      guardarLocal({ purchases: n, inventory: newInv });
+      showToast('Compra eliminada e inventario revertido');
+    }
   };
 
   // ============================================================
   //  RENDER: VENTAS & PEDIDOS
   // ============================================================
+  const deleteLog = (id) => {
+    const log = processHistory.find(l => l.id === id);
+    if (!log) return;
+    const newInv = { ...inventory };
+    if (log.type === 'trilla') {
+      newInv.pergamino = round2(newInv.pergamino + log.input);
+      newInv.azul = round2(Math.max(0, newInv.azul - log.output));
+    } else {
+      newInv.azul = round2(newInv.azul + log.input);
+      newInv.tostado = round2(Math.max(0, newInv.tostado - log.output));
+    }
+    const n = processHistory.filter(l => l.id !== id);
+    setProcessHistory(n); setInventory(newInv);
+    guardarLocal({ processHistory: n, inventory: newInv });
+    showToast('Proceso revertido y eliminado');
+  };
+
+  const updateSale = (updated) => {
+    const old = sales.find(s => s.id === updated.id);
+    if(!old) return;
+    const revInv = { ...inventory };
+    if(old.kgSold > 0) {
+      if(old.product.toLowerCase().includes('tostado')) revInv.tostado = round2(revInv.tostado + (old.kgSold * old.quantity));
+      else if(old.product.toLowerCase().includes('azul')) revInv.azul = round2(revInv.azul + (old.kgSold * old.quantity));
+    }
+    const revSup = { ...supplies };
+    if(old.bagType === 'kraft') revSup.bolsas_kraft += old.quantity;
+    if(old.bagType === 'granel') revSup.bolsas_granel += old.quantity;
+    revSup.etiquetas += old.quantity;
+    if(old.stickerType === 'grande') revSup.stickers_grandes += old.quantity;
+    if(old.stickerType === 'pequeño') revSup.stickers_pequenos += old.quantity;
+
+    if(updated.kgSold > 0) {
+      if(updated.product.toLowerCase().includes('tostado')) revInv.tostado = round2(revInv.tostado - (updated.kgSold * updated.quantity));
+      else if(updated.product.toLowerCase().includes('azul')) revInv.azul = round2(revInv.azul - (updated.kgSold * updated.quantity));
+    }
+    if(updated.bagType === 'kraft') revSup.bolsas_kraft -= updated.quantity;
+    if(updated.bagType === 'granel') revSup.bolsas_granel -= updated.quantity;
+    revSup.etiquetas -= updated.quantity;
+    if(updated.stickerType === 'grande') revSup.stickers_grandes -= updated.quantity;
+    if(updated.stickerType === 'pequeño') revSup.stickers_pequenos -= updated.quantity;
+
+    const newSales = sales.map(s => s.id === updated.id ? updated : s);
+    setSales(newSales); setInventory(revInv); setSupplies(revSup);
+    guardarLocal({ sales: newSales, inventory: revInv, supplies: revSup });
+    setEditingSale(null);
+    showToast('Venta actualizada');
+  };
+
+  const updateLog = (updated) => {
+    const old = processHistory.find(l => l.id === updated.id);
+    if(!old) return;
+    const revInv = { ...inventory };
+    if (old.type === 'trilla') {
+      revInv.pergamino = round2(revInv.pergamino + old.input);
+      revInv.azul = round2(Math.max(0, revInv.azul - old.output));
+    } else {
+      revInv.azul = round2(revInv.azul + old.input);
+      revInv.tostado = round2(Math.max(0, revInv.tostado - old.output));
+    }
+    if (updated.type === 'trilla') {
+      revInv.pergamino = round2(revInv.pergamino - updated.input);
+      revInv.azul = round2(revInv.azul + updated.output);
+    } else {
+      revInv.azul = round2(revInv.azul - updated.input);
+      revInv.tostado = round2(revInv.tostado + updated.output);
+    }
+    const newHistory = processHistory.map(l => l.id === updated.id ? updated : l);
+    setProcessHistory(newHistory); setInventory(revInv);
+    guardarLocal({ processHistory: newHistory, inventory: revInv });
+    setEditingLog(null);
+    showToast('Lote actualizado');
+  };
+
   const renderVentas = () => {
     const bs  = vAmountUSD ? (parseFloat(vAmountUSD) * rates.bs).toFixed(2)  : '0.00';
     const cop = vAmountUSD ? (parseFloat(vAmountUSD) * rates.cop).toFixed(0) : '0';
@@ -388,7 +513,7 @@ export default function App() {
       };
 
       // Descontar Inventario de Café
-      const newInv  = { ...inventory, tostado: Math.max(0, inventory.tostado - vSelectedKg) };
+      const newInv  = { ...inventory, tostado: round2(Math.max(0, inventory.tostado - (vSelectedKg * (parseInt(vQuantity) || 1)))) };
       
       // Descontar Insumos (Bolsas)
       const newSupplies = { ...supplies };
@@ -399,6 +524,9 @@ export default function App() {
         if (catItem.bagType === 'bolsas_kraft') {
           newSupplies.etiquetas = Math.max(0, newSupplies.etiquetas - (parseInt(vQuantity) || 1));
         }
+
+        if (vStickerType === 'grande') newSupplies.stickers_grandes = Math.max(0, newSupplies.stickers_grandes - (parseInt(vQuantity) || 1));
+        else if (vStickerType === 'pequeño') newSupplies.stickers_pequenos = Math.max(0, newSupplies.stickers_pequenos - (parseInt(vQuantity) || 1));
 
         if (newSupplies[catItem.bagType] <= supplies.alerta_umbral || newSupplies.etiquetas <= supplies.alerta_umbral) {
           showToast(`⚠️ ¡Quedan pocas ${catItem.bagType.replace('_',' ')} o Etiquetas!`);
@@ -530,6 +658,16 @@ export default function App() {
                     <option value="Crédito">A CRÉDITO (FIADO)</option>
                   </select>
                 </div>
+
+                {/* SELECCIÓN DE STICKER */}
+                <div className="space-y-2">
+                  <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">Tipo de Sticker</p>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={()=>setVStickerType('grande')} className={`flex-1 py-2 text-[10px] font-bold rounded-lg border transition-all ${vStickerType==='grande'?'bg-yellow-400 text-zinc-900 border-yellow-400 shadow-lg shadow-yellow-400/20':'border-zinc-800 text-zinc-500 hover:border-zinc-600'}`}>STICKER G</button>
+                    <button type="button" onClick={()=>setVStickerType('pequeño')} className={`flex-1 py-2 text-[10px] font-bold rounded-lg border transition-all ${vStickerType==='pequeño'?'bg-yellow-400 text-zinc-900 border-yellow-400 shadow-lg shadow-yellow-400/20':'border-zinc-800 text-zinc-500 hover:border-zinc-600'}`}>STICKER P</button>
+                  </div>
+                </div>
+
                 <button type="submit" className="w-full bg-yellow-400 text-zinc-900 font-black py-4 rounded-lg flex justify-center items-center gap-2 hover:bg-yellow-300 transition-colors shadow-lg">
                   <Plus size={18}/>REGISTRAR VENTA
                 </button>
@@ -574,6 +712,19 @@ export default function App() {
             {orders.length > 0 && (
               <div>
                 <h3 className="text-xs font-bold text-yellow-400 mb-2 uppercase tracking-wider flex items-center gap-2 mt-4"><Bell size={14}/>Agenda Activa ({orders.length})</h3>
+                <div className="grid grid-cols-2 gap-2 mb-3">
+                  <div className="bg-zinc-900/50 p-2 rounded-lg border border-zinc-800 text-center">
+                    <p className="text-[8px] text-zinc-500 uppercase font-bold">Kilos x Procesar</p>
+                    <p className="text-sm font-black text-white">{round2(orders.reduce((acc, o) => {
+                      const c = catalog.find(cat => cat.name === o.product);
+                      return acc + (c ? c.deductKg * o.quantity : 0);
+                    }, 0))} kg</p>
+                  </div>
+                  <div className="bg-zinc-900/50 p-2 rounded-lg border border-zinc-800 text-center">
+                    <p className="text-[8px] text-zinc-500 uppercase font-bold">Total Paquetes</p>
+                    <p className="text-sm font-black text-yellow-400">{orders.reduce((acc, o) => acc + o.quantity, 0)} uds</p>
+                  </div>
+                </div>
                 <div className="space-y-3">
                   {orders.map(o=>(
                     <div key={o.id} className="bg-zinc-950 p-3 rounded-xl border-l-4 border-l-yellow-400 border-y border-r border-zinc-800 shadow-md">
@@ -629,8 +780,8 @@ export default function App() {
         date: formatDate(cDate), isoDate: cDate,
       };
       const newInv = { ...inventory };
-      if (cProdType === 'Pergamino') newInv.pergamino += parseFloat(cKg);
-      if (cProdType === 'Azul')      newInv.azul      += parseFloat(cKg);
+      if (cProdType === 'Pergamino') newInv.pergamino = round2(newInv.pergamino + parseFloat(cKg));
+      if (cProdType === 'Azul')      newInv.azul      = round2(newInv.azul + parseFloat(cKg));
       const newPurchases = [newPurchase, ...purchases];
       setPurchases(newPurchases); setInventory(newInv);
       guardarLocal({ purchases: newPurchases, inventory: newInv });
@@ -798,10 +949,12 @@ export default function App() {
       const newInv = { ...inventory };
       if (fAction === 'trilla') {
         if (input > newInv.pergamino) { showToast('⚠️ Stock insuficiente'); return; }
-        newInv.pergamino -= input; newInv.azul += output;
+        newInv.pergamino = round2(newInv.pergamino - input); 
+        newInv.azul = round2(newInv.azul + output);
       } else {
         if (input > newInv.azul) { showToast('⚠️ Stock insuficiente'); return; }
-        newInv.azul -= input; newInv.tostado += output;
+        newInv.azul = round2(newInv.azul - input); 
+        newInv.tostado = round2(newInv.tostado + output);
       }
       let costPerKg = 0;
       const lastPurchase = purchases.find(p => p.coffeeType === (fAction === 'trilla' ? 'Pergamino' : 'Azul'));
@@ -888,7 +1041,13 @@ export default function App() {
                       </p>
                     )}
                   </div>
-                  <span className={`font-black text-sm ${parseFloat(log.merma)>22?'text-red-400':'text-green-400'}`}>{log.merma}%</span>
+                  <div className="flex items-center gap-3">
+                    <span className={`font-black text-sm ${parseFloat(log.merma)>22?'text-red-400':'text-green-400'}`}>{log.merma}%</span>
+                    <div className="flex gap-2">
+                      <button onClick={()=>setEditingLog(log)} className="text-zinc-700 hover:text-yellow-400 p-1"><Edit3 size={13}/></button>
+                      <button onClick={()=>deleteLog(log.id)} className="text-zinc-700 hover:text-red-500 p-1"><Trash2 size={13}/></button>
+                    </div>
+                  </div>
                 </div>
               ))}
             </div>
@@ -924,118 +1083,228 @@ export default function App() {
 
     return (
       <div className="p-4 space-y-4 animate-in fade-in duration-300">
-        {/* ALERTAS DE STOCK */}
-        {(supplies.bolsas_kraft <= supplies.alerta_umbral || supplies.bolsas_granel <= supplies.alerta_umbral) && (
-          <div className="bg-red-900/20 border border-red-500/50 p-4 rounded-2xl flex items-center gap-3">
-            <AlertTriangle className="text-red-500 animate-pulse" size={24}/>
+        <div className="flex bg-zinc-900 p-1 rounded-xl border border-zinc-800">
+          <button onClick={()=>setBalanceSubTab('general')} className={`flex-1 py-2 text-[10px] font-bold rounded-lg transition-all ${balanceSubTab==='general'?'bg-zinc-800 text-yellow-400':'text-zinc-500'}`}>RESUMEN</button>
+          <button onClick={()=>setBalanceSubTab('analytics')} className={`flex-1 py-2 text-[10px] font-bold rounded-lg transition-all ${balanceSubTab==='analytics'?'bg-zinc-800 text-yellow-400':'text-zinc-500'}`}>ESTADÍSTICAS PRO</button>
+        </div>
+
+        {balanceSubTab === 'general' ? (
+          <>
+            {/* ALERTAS DE STOCK */}
+            {(supplies.bolsas_kraft <= supplies.alerta_umbral || supplies.bolsas_granel <= supplies.alerta_umbral || supplies.etiquetas <= supplies.alerta_umbral) && (
+              <div className="bg-red-900/20 border border-red-500/50 p-4 rounded-2xl flex items-center gap-3">
+                <AlertTriangle className="text-red-500 animate-pulse" size={24}/>
+                <div>
+                  <p className="text-xs font-black text-red-500 uppercase">¡Alerta de Insumos!</p>
+                  <p className="text-[10px] text-zinc-400">
+                    {supplies.bolsas_kraft <= supplies.alerta_umbral && `Bolsas Kraft (${supplies.bolsas_kraft}) `}
+                    {supplies.bolsas_granel <= supplies.alerta_umbral && `Bolsas Granel (${supplies.bolsas_granel}) `}
+                    {supplies.etiquetas <= supplies.alerta_umbral && `Etiquetas (${supplies.etiquetas}) `}
+                    bajas.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* GRÁFICO 7 DÍAS */}
+            <div className="bg-zinc-900 rounded-2xl p-5 shadow-xl border border-zinc-800">
+              <h3 className="text-[10px] font-bold text-yellow-400 uppercase tracking-widest mb-4 flex items-center gap-1"><BarChart3 size={14}/>Tendencia (7 Días)</h3>
+              <div className="flex items-end justify-between h-28 gap-1">
+                {chartData.map((data,i)=>{
+                  const h=(data.total/maxChart)*100;
+                  return (
+                    <div key={i} className="flex flex-col items-center w-full group">
+                      <div className="text-[8px] text-zinc-400 mb-1 opacity-0 group-hover:opacity-100 transition-opacity">${data.total.toFixed(0)}</div>
+                      <div className="w-full bg-yellow-400/20 rounded-t-sm" style={{height:'80px',display:'flex',alignItems:'flex-end'}}>
+                        <div className="w-full bg-yellow-400 rounded-t-sm transition-all duration-500" style={{height:`${h}%`,minHeight:data.total>0?'4px':'0px'}}/>
+                      </div>
+                      <div className="text-[8px] text-zinc-500 mt-1 font-bold">{data.date}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* PnL CARD */}
+            <div className="bg-zinc-900 rounded-2xl p-6 shadow-xl border border-zinc-800 relative overflow-hidden">
+              <TrendingUp size={100} className="absolute -bottom-4 -right-4 text-yellow-400 opacity-5"/>
+              <p className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">Balance Neto (Base COP)</p>
+              <div className={`text-4xl font-black mt-1 ${netPnL>=0?'text-white':'text-red-400'}`}>${netPnL.toLocaleString('es-CO')}</div>
+              <div className="grid grid-cols-3 gap-2 border-t border-zinc-800 pt-3 mt-3">
+                <div><p className="text-[8px] text-zinc-500 uppercase">Ingresos</p><p className="font-bold text-green-400 text-xs">+{ingresosCOP.toLocaleString('es-CO')}</p></div>
+                <div><p className="text-[8px] text-zinc-500 uppercase">Compras MP</p><p className="font-bold text-red-400 text-xs">-{comprasMPCOP.toLocaleString('es-CO')}</p></div>
+                <div><p className="text-[8px] text-zinc-500 uppercase">OPEX</p><p className="font-bold text-orange-400 text-xs">-{opexCOP.toLocaleString('es-CO')}</p></div>
+              </div>
+              <div className="grid grid-cols-2 gap-2 border-t border-zinc-800 pt-3 mt-3">
+                <div><p className="text-[8px] text-zinc-500 uppercase flex items-center gap-1"><Target size={10}/>Ticket Prom.</p><p className="font-bold text-yellow-400 text-xs">${ticketPromedio.toLocaleString('es-CO')}</p></div>
+                <div><p className="text-[8px] text-zinc-500 uppercase flex items-center gap-1"><PieChart size={10}/>Total Ventas</p><p className="font-bold text-green-400 text-xs">+{sales.reduce((a,b)=>a+b.cop,0).toLocaleString('es-CO')}</p></div>
+              </div>
+              <div className="mt-3 pt-3 border-t border-zinc-800 flex justify-between items-center">
+                <p className="text-[8px] text-zinc-500 uppercase flex items-center gap-1"><Coffee size={10}/>Donaciones</p>
+                <p className="font-bold text-blue-400 text-xs">{donationsCount} veces ({kgDonated.toFixed(1)}kg)</p>
+              </div>
+            </div>
+
+            {/* CXC / CXP */}
+            <div className="grid grid-cols-2 gap-4">
+              <div className="bg-zinc-900 border border-orange-500/30 rounded-xl p-4">
+                <h3 className="text-[10px] font-bold text-orange-400 uppercase tracking-widest mb-2 flex items-center gap-1"><ArrowRightLeft size={12}/>A COBRAR</h3>
+                <div className="text-xl font-black text-white mb-2">${cxCobrar.reduce((a,c)=>a+(c.cop-(c.paidAmount||0)),0).toLocaleString('es-CO')}</div>
+                <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
+                  {cxCobrar.length===0 && <p className="text-[10px] text-zinc-600">Sin cuentas pendientes</p>}
+                  {cxCobrar.map(c=>{
+                    const pending=c.cop-(c.paidAmount||0); const over=isOverdue(c.isoDate);
+                    return (
+                      <div key={c.id} className={`bg-zinc-950 p-2 rounded border flex justify-between items-center ${over?'border-red-900/50':'border-zinc-800'}`}>
+                        <div><p className="text-[10px] font-bold text-zinc-300 truncate w-20 flex items-center gap-1">{over&&<Flag size={8} className="text-red-500"/>}{c.clientName}</p><p className="text-[8px] text-orange-400">${pending.toLocaleString('es-CO')}</p></div>
+                        <button onClick={()=>markPaid(c,'cxc')} className="text-[8px] bg-green-900/30 text-green-400 px-2 py-1 rounded font-bold">ABONAR</button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="bg-zinc-900 border border-red-500/30 rounded-xl p-4">
+                <h3 className="text-[10px] font-bold text-red-400 uppercase tracking-widest mb-2 flex items-center gap-1"><BookOpen size={12}/>A PAGAR</h3>
+                <div className="text-xl font-black text-white mb-2">${cxPagar.reduce((a,p)=>a+(p.cop-(p.paidAmount||0)),0).toLocaleString('es-CO')}</div>
+                <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
+                  {cxPagar.length===0 && <p className="text-[10px] text-zinc-600">Sin deudas pendientes</p>}
+                  {cxPagar.map(p=>{
+                    const pending=p.cop-(p.paidAmount||0);
+                    return (
+                      <div key={p.id} className="bg-zinc-950 p-2 rounded border border-zinc-800 flex justify-between items-center">
+                        <div><p className="text-[10px] font-bold text-zinc-300 truncate w-20">{p.producer}</p><p className="text-[8px] text-red-400">${pending.toLocaleString('es-CO')}</p></div>
+                        <button onClick={()=>markPaid(p,'cxp')} className="text-[8px] bg-red-900/30 text-red-400 px-2 py-1 rounded font-bold">ABONAR</button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+            
+            {/* HISTORIAL VENTAS */}
             <div>
-              <p className="text-xs font-black text-red-500 uppercase">¡Alerta de Insumos!</p>
-              <p className="text-[10px] text-zinc-400">
-                {supplies.bolsas_kraft <= supplies.alerta_umbral && `Bolsas Kraft (${supplies.bolsas_kraft}) `}
-                {supplies.bolsas_granel <= supplies.alerta_umbral && `Bolsas Granel (${supplies.bolsas_granel}) `}
-                {supplies.etiquetas <= supplies.alerta_umbral && `Etiquetas (${supplies.etiquetas}) `}
-                bajas.
-              </p>
+              <h3 className="text-xs font-bold text-yellow-400 mb-2 uppercase tracking-wider flex items-center gap-2 mt-4"><List size={14}/>Últimas Ventas</h3>
+              {sales.length===0 && <p className="text-xs text-zinc-600 text-center py-4">Aún no hay ventas registradas</p>}
+              <div className="space-y-2">
+                {sales.slice(0,visibleSales).map(s=>{
+                  const statusText = s.isPaid ? 'Pagado' : (s.paidAmount>0 ? `Abonó $${s.paidAmount.toFixed(2)}` : 'Fiado');
+                  return (
+                    <div key={s.id} className="bg-zinc-900 p-3 rounded-xl border border-zinc-800 flex justify-between items-center">
+                      <div><p className="font-bold text-zinc-200 text-xs">{s.quantity||1}x {s.product}</p><p className="text-[9px] text-zinc-500">{s.date} • {s.clientName} • {statusText}</p></div>
+                      <div className="flex items-center gap-2">
+                        <span className={`font-black text-sm ${s.isPaid?'text-green-400':'text-orange-400'}`}>+${s.usd.toFixed(2)}</span>
+                        <button onClick={()=>openInvoice(s)} className="text-yellow-400/50 hover:text-yellow-400"><Share2 size={15}/></button>
+                        <button onClick={()=>setEditingSale(s)} className="text-zinc-700 hover:text-yellow-400"><Edit3 size={13}/></button>
+                        <button onClick={()=>deleteSale(s.id)} className="text-zinc-700 hover:text-red-500"><Trash2 size={13}/></button>
+                      </div>
+                    </div>
+                  );
+                })}
+                {sales.length>visibleSales && <button onClick={()=>setVisibleSales(p=>p+10)} className="w-full text-xs font-bold text-zinc-500 py-2 border border-dashed border-zinc-800 rounded-lg hover:text-yellow-400 hover:border-yellow-400/30">CARGAR MÁS ({sales.length-visibleSales} restantes)</button>}
+              </div>
+            </div>
+          </>
+        ) : (
+          <div className="space-y-4">
+            {/* PRODUCER QUALITY */}
+            <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
+              <h3 className="text-xs font-bold text-yellow-400 mb-3 uppercase tracking-widest flex items-center justify-between">
+                <span>Calidad por Productor</span>
+                <button onClick={()=>exportToCSV(producers.map(p=>{
+                  const n=typeof p==='string'?p:p.name;
+                  const logs=processHistory.filter(l=>l.producer===n);
+                  const totalIn=logs.reduce((a,b)=>a+b.input,0);
+                  const totalOut=logs.reduce((a,b)=>a+b.output,0);
+                  const avgMerma=totalIn>0?((totalIn-totalOut)/totalIn*100).toFixed(1):0;
+                  return {Productor:n, Entregado:totalIn, Procesado:totalOut, MermaPromedio:avgMerma+'%'};
+                }), 'Calidad_Productores')} className="text-[10px] text-zinc-500 hover:text-white"><Download size={12}/></button>
+              </h3>
+              <div className="space-y-2 max-h-48 overflow-y-auto">
+                {producers.length === 0 ? <p className="text-[10px] text-zinc-600">Sin datos de fábrica aún.</p> : producers.map(p=>{
+                  const n=typeof p==='string'?p:p.name;
+                  const logs=processHistory.filter(l=>l.producer===n);
+                  if(logs.length===0) return null;
+                  const totalIn=logs.reduce((a,b)=>a+b.input,0);
+                  const totalOut=logs.reduce((a,b)=>a+b.output,0);
+                  const avgMerma=totalIn>0?((totalIn-totalOut)/totalIn*100).toFixed(1):0;
+                  return (
+                    <div key={n} className="bg-zinc-950 p-2 rounded border border-zinc-800 flex justify-between items-center text-[10px]">
+                      <div><p className="font-bold text-white">{n}</p><p className="text-zinc-500">{totalIn}kg ➔ {totalOut}kg</p></div>
+                      <div className={`font-black ${parseFloat(avgMerma)>22?'text-red-400':'text-green-400'}`}>{avgMerma}% merma</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* TOP BUYERS */}
+            <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
+              <h3 className="text-xs font-bold text-green-400 mb-3 uppercase tracking-widest flex items-center justify-between">
+                <span>Mayores Compradores</span>
+                <button onClick={()=>exportToCSV(clients.map(c=>{
+                  const s=sales.filter(sl=>sl.clientName===c.fullName);
+                  const total=s.reduce((a,b)=>a+b.cop,0);
+                  const kgs=s.reduce((a,b)=>a+(b.kgSold*b.quantity),0);
+                  return {Cliente:c.fullName, TotalCOP:total, Kilos:kgs, Visitas:s.length};
+                }), 'Mayores_Compradores')} className="text-[10px] text-zinc-500 hover:text-white"><Download size={12}/></button>
+              </h3>
+              <div className="space-y-2 max-h-48 overflow-y-auto">
+                {clients.length === 0 ? <p className="text-[10px] text-zinc-600">Sin ventas registradas aún.</p> : clients
+                  .map(c => {
+                    const s=sales.filter(sl=>sl.clientName===c.fullName);
+                    const total=s.reduce((a,b)=>a+b.cop,0);
+                    const kgs=s.reduce((a,b)=>a+(b.kgSold*b.quantity),0);
+                    return { ...c, totalSales: total, totalKgs: kgs, visits: s.length };
+                  })
+                  .filter(c => c.visits > 0)
+                  .sort((a,b) => b.totalSales - a.totalSales)
+                  .map(c=>(
+                    <div key={c.id} className="bg-zinc-950 p-2 rounded border border-zinc-800 flex justify-between items-center text-[10px]">
+                      <div><p className="font-bold text-white">{c.fullName}</p><p className="text-zinc-500">{c.visits} compras • {c.totalKgs.toFixed(1)}kg</p></div>
+                      <div className="font-black text-green-400">${c.totalSales.toLocaleString('es-CO')}</div>
+                    </div>
+                  ))}
+              </div>
+            </div>
+
+            {/* CONVERSION HISTORY */}
+            <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
+              <h3 className="text-xs font-bold text-blue-400 mb-3 uppercase tracking-widest flex items-center justify-between">
+                <span>Historial de Conversión</span>
+                <button onClick={()=>exportToCSV(processHistory, 'Historial_Procesos')} className="text-[10px] text-zinc-500 hover:text-white"><Download size={12}/></button>
+              </h3>
+              <div className="space-y-3">
+                <div className="flex gap-2">
+                   <div className="flex-1 bg-zinc-950 p-3 rounded-lg text-center border border-zinc-800">
+                     <p className="text-[8px] text-zinc-500 uppercase">Trillado Total</p>
+                     <p className="text-sm font-black text-white">{round2(processHistory.filter(l=>l.type==='trilla').reduce((a,b)=>a+b.input,0))}kg</p>
+                   </div>
+                   <div className="flex-1 bg-zinc-950 p-3 rounded-lg text-center border border-zinc-800">
+                     <p className="text-[8px] text-zinc-500 uppercase">Tostado Total</p>
+                     <p className="text-sm font-black text-white">{round2(processHistory.filter(l=>l.type==='tueste').reduce((a,b)=>a+b.output,0))}kg</p>
+                   </div>
+                </div>
+                <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-800 flex justify-between items-center">
+                  <span className="text-[10px] font-bold text-zinc-400">Merma Promedio General:</span>
+                  <span className="text-sm font-black text-white">
+                    {processHistory.length > 0 ? (processHistory.reduce((acc, l) => acc + parseFloat(l.merma), 0) / processHistory.length).toFixed(1) : 0}%
+                  </span>
+                </div>
+              </div>
+            </div>
+            
+            {/* EXPORT ALL DATA */}
+            <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
+              <h3 className="text-xs font-bold text-zinc-400 mb-3 uppercase tracking-widest flex items-center gap-2"><Database size={12}/>Reportes Completos (Excel)</h3>
+              <div className="grid grid-cols-2 gap-2">
+                <button onClick={()=>exportToCSV(sales, 'Ventas_Completas')} className="bg-zinc-950 text-white p-2 rounded text-[10px] font-bold border border-zinc-800 hover:border-yellow-400/50">VENTAS.csv</button>
+                <button onClick={()=>exportToCSV(purchases, 'Compras_Completas')} className="bg-zinc-950 text-white p-2 rounded text-[10px] font-bold border border-zinc-800 hover:border-yellow-400/50">COMPRAS.csv</button>
+                <button onClick={()=>exportToCSV(expenses, 'Gastos_Completas')} className="bg-zinc-950 text-white p-2 rounded text-[10px] font-bold border border-zinc-800 hover:border-yellow-400/50">GASTOS.csv</button>
+                <button onClick={()=>exportToCSV(processHistory, 'Procesos_Completas')} className="bg-zinc-950 text-white p-2 rounded text-[10px] font-bold border border-zinc-800 hover:border-yellow-400/50">PROCESOS.csv</button>
+              </div>
             </div>
           </div>
         )}
-
-        {/* GRÁFICO 7 DÍAS */}
-        <div className="bg-zinc-900 rounded-2xl p-5 shadow-xl border border-zinc-800">
-          <h3 className="text-[10px] font-bold text-yellow-400 uppercase tracking-widest mb-4 flex items-center gap-1"><BarChart3 size={14}/>Tendencia (7 Días)</h3>
-          <div className="flex items-end justify-between h-28 gap-1">
-            {chartData.map((data,i)=>{
-              const h=(data.total/maxChart)*100;
-              return (
-                <div key={i} className="flex flex-col items-center w-full group">
-                  <div className="text-[8px] text-zinc-400 mb-1 opacity-0 group-hover:opacity-100 transition-opacity">${data.total.toFixed(0)}</div>
-                  <div className="w-full bg-yellow-400/20 rounded-t-sm" style={{height:'80px',display:'flex',alignItems:'flex-end'}}>
-                    <div className="w-full bg-yellow-400 rounded-t-sm transition-all duration-500" style={{height:`${h}%`,minHeight:data.total>0?'4px':'0px'}}/>
-                  </div>
-                  <div className="text-[8px] text-zinc-500 mt-1 font-bold">{data.date}</div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* PnL CARD */}
-        <div className="bg-zinc-900 rounded-2xl p-6 shadow-xl border border-zinc-800 relative overflow-hidden">
-          <TrendingUp size={100} className="absolute -bottom-4 -right-4 text-yellow-400 opacity-5"/>
-          <p className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">Balance Neto (Base COP)</p>
-          <div className={`text-4xl font-black mt-1 ${netPnL>=0?'text-white':'text-red-400'}`}>${netPnL.toLocaleString('es-CO')}</div>
-          <div className="grid grid-cols-3 gap-2 border-t border-zinc-800 pt-3 mt-3">
-            <div><p className="text-[8px] text-zinc-500 uppercase">Ingresos</p><p className="font-bold text-green-400 text-xs">+{ingresosCOP.toLocaleString('es-CO')}</p></div>
-            <div><p className="text-[8px] text-zinc-500 uppercase">Compras MP</p><p className="font-bold text-red-400 text-xs">-{comprasMPCOP.toLocaleString('es-CO')}</p></div>
-            <div><p className="text-[8px] text-zinc-500 uppercase">OPEX</p><p className="font-bold text-orange-400 text-xs">-{opexCOP.toLocaleString('es-CO')}</p></div>
-          </div>
-          <div className="grid grid-cols-2 gap-2 border-t border-zinc-800 pt-3 mt-3">
-            <div><p className="text-[8px] text-zinc-500 uppercase flex items-center gap-1"><Target size={10}/>Ticket Prom.</p><p className="font-bold text-yellow-400 text-xs">${ticketPromedio.toLocaleString('es-CO')}</p></div>
-            <div><p className="text-[8px] text-zinc-500 uppercase flex items-center gap-1"><PieChart size={10}/>Total Ventas</p><p className="font-bold text-green-400 text-xs">+{sales.reduce((a,b)=>a+b.cop,0).toLocaleString('es-CO')}</p></div>
-          </div>
-          <div className="mt-3 pt-3 border-t border-zinc-800 flex justify-between items-center">
-            <p className="text-[8px] text-zinc-500 uppercase flex items-center gap-1"><Coffee size={10}/>Donaciones</p>
-            <p className="font-bold text-blue-400 text-xs">{donationsCount} veces ({kgDonated.toFixed(1)}kg)</p>
-          </div>
-        </div>
-
-        {/* CXC / CXP */}
-        <div className="grid grid-cols-2 gap-4">
-          <div className="bg-zinc-900 border border-orange-500/30 rounded-xl p-4">
-            <h3 className="text-[10px] font-bold text-orange-400 uppercase tracking-widest mb-2 flex items-center gap-1"><ArrowRightLeft size={12}/>A COBRAR</h3>
-            <div className="text-xl font-black text-white mb-2">${cxCobrar.reduce((a,c)=>a+(c.cop-(c.paidAmount||0)),0).toLocaleString('es-CO')}</div>
-            <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
-              {cxCobrar.length===0 && <p className="text-[10px] text-zinc-600">Sin cuentas pendientes</p>}
-              {cxCobrar.map(c=>{
-                const pending=c.cop-(c.paidAmount||0); const over=isOverdue(c.isoDate);
-                return (
-                  <div key={c.id} className={`bg-zinc-950 p-2 rounded border flex justify-between items-center ${over?'border-red-900/50':'border-zinc-800'}`}>
-                    <div><p className="text-[10px] font-bold text-zinc-300 truncate w-20 flex items-center gap-1">{over&&<Flag size={8} className="text-red-500"/>}{c.clientName}</p><p className="text-[8px] text-orange-400">${pending.toLocaleString('es-CO')}</p></div>
-                    <button onClick={()=>markPaid(c,'cxc')} className="text-[8px] bg-green-900/30 text-green-400 px-2 py-1 rounded font-bold">ABONAR</button>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-          <div className="bg-zinc-900 border border-red-500/30 rounded-xl p-4">
-            <h3 className="text-[10px] font-bold text-red-400 uppercase tracking-widest mb-2 flex items-center gap-1"><BookOpen size={12}/>A PAGAR</h3>
-            <div className="text-xl font-black text-white mb-2">${cxPagar.reduce((a,p)=>a+(p.cop-(p.paidAmount||0)),0).toLocaleString('es-CO')}</div>
-            <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
-              {cxPagar.length===0 && <p className="text-[10px] text-zinc-600">Sin deudas pendientes</p>}
-              {cxPagar.map(p=>{
-                const pending=p.cop-(p.paidAmount||0);
-                return (
-                  <div key={p.id} className="bg-zinc-950 p-2 rounded border border-zinc-800 flex justify-between items-center">
-                    <div><p className="text-[10px] font-bold text-zinc-300 truncate w-20">{p.producer}</p><p className="text-[8px] text-red-400">${pending.toLocaleString('es-CO')}</p></div>
-                    <button onClick={()=>markPaid(p,'cxp')} className="text-[8px] bg-blue-900/30 text-blue-400 px-2 py-1 rounded font-bold">ABONAR</button>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-
-        {/* HISTORIAL VENTAS */}
-        <div>
-          <h3 className="text-xs font-bold text-yellow-400 mb-2 uppercase tracking-wider flex items-center gap-2"><List size={14}/>Últimas Ventas</h3>
-          {sales.length===0 && <p className="text-xs text-zinc-600 text-center py-4">Aún no hay ventas registradas</p>}
-          <div className="space-y-2">
-            {sales.slice(0,visibleSales).map(s=>{
-              const statusText = s.isPaid ? 'Pagado' : (s.paidAmount>0 ? `Abonó $${s.paidAmount.toFixed(2)}` : 'Fiado');
-              return (
-                <div key={s.id} className="bg-zinc-900 p-3 rounded-xl border border-zinc-800 flex justify-between items-center">
-                  <div><p className="font-bold text-zinc-200 text-xs">{s.quantity||1}x {s.product}</p><p className="text-[9px] text-zinc-500">{s.date} • {s.clientName} • {statusText}</p></div>
-                  <div className="flex items-center gap-2">
-                    <span className={`font-black text-sm ${s.isPaid?'text-green-400':'text-orange-400'}`}>+${s.usd.toFixed(2)}</span>
-                    <button onClick={()=>openInvoice(s)} className="text-yellow-400/50 hover:text-yellow-400"><Share2 size={15}/></button>
-                    <button onClick={()=>deleteSale(s.id)} className="text-zinc-700 hover:text-red-500"><Trash2 size={13}/></button>
-                  </div>
-                </div>
-              );
-            })}
-            {sales.length>visibleSales && <button onClick={()=>setVisibleSales(p=>p+10)} className="w-full text-xs font-bold text-zinc-500 py-2 border border-dashed border-zinc-800 rounded-lg hover:text-yellow-400 hover:border-yellow-400/30">CARGAR MÁS ({sales.length-visibleSales} restantes)</button>}
-          </div>
-        </div>
       </div>
     );
   };
@@ -1057,7 +1326,7 @@ export default function App() {
             <div>
               <h1 className="text-xl font-black tracking-widest leading-none text-white">COLADOS</h1>
               <p className="text-[9px] text-zinc-400 tracking-[0.2em] mt-0.5 font-bold">BY HARVEY CÁRDENAS</p>
-              <p className="text-[9px] text-yellow-400 tracking-[0.2em] font-bold">V7.1 · OFFLINE-FIRST PWA</p>
+              <p className="text-[9px] text-yellow-400 tracking-[0.2em] font-bold">V7.2 · OFFLINE-FIRST PWA</p>
             </div>
           </div>
           <button onClick={()=>setShowSettings(true)} className="p-2 text-zinc-400 hover:text-yellow-400 bg-zinc-800 rounded-full transition-colors"><Settings size={20}/></button>
@@ -1129,8 +1398,12 @@ export default function App() {
                 <h3 className="text-sm font-bold text-yellow-400 mb-3 flex items-center gap-2"><UserCheck size={16}/>Clientes</h3>
                 {!showNewClientForm?(
                   <><button onClick={()=>setShowNewClientForm(true)} className="w-full mb-3 bg-zinc-800 text-yellow-400 text-xs font-bold p-3 rounded-lg border border-yellow-400/30 flex justify-center items-center gap-2"><Plus size={14}/>NUEVO CLIENTE</button>
+                  <input type="text" placeholder="Buscar cliente..." value={filterClient} onChange={e=>setFilterClient(e.target.value)} className="w-full mb-3 p-2 bg-zinc-950 border border-zinc-800 rounded text-xs text-white outline-none focus:border-yellow-400/50"/>
                   <div className="space-y-2 max-h-48 overflow-y-auto">
-                    {clients.length===0?<p className="text-xs text-zinc-600">Sin clientes aún.</p>:clients.map(c=>{
+                    {clients.length===0?<p className="text-xs text-zinc-600">Sin clientes aún.</p>:clients
+                      .filter(c => c.fullName.toLowerCase().includes(filterClient.toLowerCase()) || (c.business && c.business.toLowerCase().includes(filterClient.toLowerCase())))
+                      .sort((a,b) => a.fullName.localeCompare(b.fullName))
+                      .map(c=>{
                       const t=sales.filter(s=>s.clientName===c.fullName).reduce((a,b)=>a+b.cop,0);
                       return(
                         <div key={c.id} className="bg-zinc-950 p-2 rounded-lg border border-zinc-800 flex justify-between items-center">
@@ -1173,8 +1446,21 @@ export default function App() {
                 <h3 className="text-sm font-bold text-yellow-400 mb-3 flex items-center gap-2"><Flame size={16}/>Productores</h3>
                 {!showNewProducerForm?(
                   <><button onClick={()=>setShowNewProducerForm(true)} className="w-full mb-3 bg-zinc-800 text-yellow-400 text-xs font-bold p-3 rounded-lg border border-yellow-400/30 flex justify-center items-center gap-2"><Plus size={14}/>NUEVO PRODUCTOR</button>
+                  <input type="text" placeholder="Buscar productor..." value={filterProducer} onChange={e=>setFilterProducer(e.target.value)} className="w-full mb-3 p-2 bg-zinc-950 border border-zinc-800 rounded text-xs text-white outline-none focus:border-yellow-400/50"/>
                   <div className="space-y-2 max-h-48 overflow-y-auto">
-                    {producers.length===0?<p className="text-xs text-zinc-600">Sin productores aún.</p>:producers.map(p=>{
+                    {producers.length===0?<p className="text-xs text-zinc-600">Sin productores aún.</p>:producers
+                      .filter(p => {
+                        const n=typeof p==='string'?p:p.name;
+                        const f=typeof p==='string'?'':p.finca;
+                        const s=typeof p==='string'?'':p.sector;
+                        return n.toLowerCase().includes(filterProducer.toLowerCase()) || f.toLowerCase().includes(filterProducer.toLowerCase()) || (s && s.toLowerCase().includes(filterProducer.toLowerCase()));
+                      })
+                      .sort((a,b) => {
+                        const nA=typeof a==='string'?a:a.name;
+                        const nB=typeof b==='string'?b:b.name;
+                        return nA.localeCompare(nB);
+                      })
+                      .map(p=>{
                       const n=typeof p==='string'?p:p.name;
                       const f=typeof p==='string'?'':p.finca;
                       return(
@@ -1211,10 +1497,9 @@ export default function App() {
                 )}
               </div>
 
-              {/* GESTIÓN DE INSUMOS */}
               <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
                 <h3 className="text-sm font-bold text-blue-400 mb-3 flex items-center gap-2"><Package size={16}/>Inventario de Insumos</h3>
-                <div className="grid grid-cols-2 gap-3 mb-4">
+                <div className="grid grid-cols-2 gap-3 mb-3">
                   <div className="bg-zinc-950 p-2 rounded-lg border border-zinc-800">
                     <p className="text-[8px] text-zinc-500 uppercase font-bold">Bolsas Kraft</p>
                     <input type="number" value={supplies.bolsas_kraft} onChange={e=>{const s={...supplies,bolsas_kraft:parseInt(e.target.value)||0}; setSupplies(s); guardarLocal({supplies:s});}} className="w-full bg-transparent text-white font-black text-lg outline-none"/>
@@ -1224,8 +1509,22 @@ export default function App() {
                     <input type="number" value={supplies.bolsas_granel} onChange={e=>{const s={...supplies,bolsas_granel:parseInt(e.target.value)||0}; setSupplies(s); guardarLocal({supplies:s});}} className="w-full bg-transparent text-white font-black text-lg outline-none"/>
                   </div>
                 </div>
+                <div className="grid grid-cols-2 gap-3 mb-3">
+                  <div className="bg-zinc-950 p-2 rounded-lg border border-zinc-800">
+                    <p className="text-[8px] text-zinc-500 uppercase font-bold">Stickers G</p>
+                    <input type="number" value={supplies.stickers_grandes} onChange={e=>{const s={...supplies,stickers_grandes:parseInt(e.target.value)||0}; setSupplies(s); guardarLocal({supplies:s});}} className="w-full bg-transparent text-white font-black text-lg outline-none"/>
+                  </div>
+                  <div className="bg-zinc-950 p-2 rounded-lg border border-zinc-800">
+                    <p className="text-[8px] text-zinc-500 uppercase font-bold">Stickers P</p>
+                    <input type="number" value={supplies.stickers_pequenos} onChange={e=>{const s={...supplies,stickers_pequenos:parseInt(e.target.value)||0}; setSupplies(s); guardarLocal({supplies:s});}} className="w-full bg-transparent text-white font-black text-lg outline-none"/>
+                  </div>
+                </div>
+                <div className="bg-zinc-950 p-2 rounded-lg border border-zinc-800 mb-3">
+                  <p className="text-[8px] text-zinc-500 uppercase font-bold text-center">Etiquetas de Lote</p>
+                  <input type="number" value={supplies.etiquetas} onChange={e=>{const s={...supplies,etiquetas:parseInt(e.target.value)||0}; setSupplies(s); guardarLocal({supplies:s});}} className="w-full bg-transparent text-white font-black text-center text-sm outline-none"/>
+                </div>
                 <div className="bg-zinc-950 p-2 rounded-lg border border-zinc-800">
-                  <p className="text-[8px] text-zinc-500 uppercase font-bold text-center">Umbral de Alerta (Pocas Unidades)</p>
+                  <p className="text-[8px] text-zinc-500 uppercase font-bold text-center">Umbral de Alerta</p>
                   <input type="number" value={supplies.alerta_umbral} onChange={e=>{const s={...supplies,alerta_umbral:parseInt(e.target.value)||0}; setSupplies(s); guardarLocal({supplies:s});}} className="w-full bg-transparent text-yellow-400 font-black text-center text-sm outline-none"/>
                 </div>
               </div>
@@ -1298,6 +1597,66 @@ export default function App() {
             <div className="flex gap-3 w-full max-w-sm mt-5">
               <button onClick={()=>shareInvoiceText(invoiceModal.sale)} className="flex-1 bg-zinc-800 border border-yellow-400 text-yellow-400 p-3 rounded-xl font-bold flex items-center justify-center gap-2 text-sm"><Share2 size={16}/>Compartir</button>
               <button onClick={()=>downloadInvoiceImage(invoiceModal.sale)} className="flex-1 bg-yellow-400 text-zinc-900 p-3 rounded-xl font-black flex items-center justify-center gap-2 text-sm"><Download size={16}/>Guardar</button>
+            </div>
+          </div>
+        )}
+
+        {/* EDIT SALES MODAL */}
+        {editingSale && (
+          <div className="fixed inset-0 bg-black/95 z-50 flex items-center justify-center p-4 animate-in fade-in">
+            <div className="bg-zinc-900 w-full max-w-sm rounded-2xl border border-zinc-800 p-6 space-y-4 shadow-2xl">
+              <div className="flex justify-between items-center">
+                <h3 className="text-white font-black uppercase tracking-widest text-sm flex items-center gap-2"><Edit3 size={18} className="text-yellow-400"/>Editar Venta</h3>
+                <button onClick={()=>setEditingSale(null)} className="text-zinc-500 hover:text-white p-2 bg-zinc-800 rounded-full"><X size={18}/></button>
+              </div>
+              <div className="space-y-3">
+                <div>
+                  <label className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Cliente</label>
+                  <input type="text" value={editingSale.clientName} onChange={e=>setEditingSale({...editingSale, clientName: e.target.value})} className="w-full bg-zinc-950 border border-zinc-800 text-white rounded-lg p-3 text-sm focus:border-yellow-400 outline-none transition-colors"/>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Cantidad</label>
+                    <input type="number" value={editingSale.quantity} onChange={e=>setEditingSale({...editingSale, quantity: parseInt(e.target.value)||0})} className="w-full bg-zinc-950 border border-zinc-800 text-white rounded-lg p-3 text-sm outline-none"/>
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Kilos/Unid</label>
+                    <input type="number" step="0.01" value={editingSale.kgSold} onChange={e=>setEditingSale({...editingSale, kgSold: parseFloat(e.target.value)||0})} className="w-full bg-zinc-950 border border-zinc-800 text-white rounded-lg p-3 text-sm outline-none"/>
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Total COP</label>
+                  <input type="number" value={editingSale.cop} onChange={e=>setEditingSale({...editingSale, cop: parseInt(e.target.value)||0, usd: (parseInt(e.target.value)||0)/rates.cop, bs: ((parseInt(e.target.value)||0)/rates.cop)*rates.bs})} className="w-full bg-zinc-950 border border-zinc-800 text-white rounded-lg p-3 text-sm outline-none"/>
+                </div>
+              </div>
+              <button onClick={()=>updateSale(editingSale)} className="w-full bg-yellow-400 text-zinc-900 font-black p-4 rounded-xl text-sm tracking-widest hover:bg-yellow-300 transition-colors shadow-lg">GUARDAR CAMBIOS</button>
+            </div>
+          </div>
+        )}
+
+        {/* EDIT LOG MODAL */}
+        {editingLog && (
+          <div className="fixed inset-0 bg-black/95 z-50 flex items-center justify-center p-4 animate-in fade-in">
+            <div className="bg-zinc-900 w-full max-w-sm rounded-2xl border border-zinc-800 p-6 space-y-4 shadow-2xl">
+              <div className="flex justify-between items-center">
+                <h3 className="text-white font-black uppercase tracking-widest text-sm flex items-center gap-2"><Factory size={18} className="text-blue-400"/>Editar Lote</h3>
+                <button onClick={()=>setEditingLog(null)} className="text-zinc-500 hover:text-white p-2 bg-zinc-800 rounded-full"><X size={18}/></button>
+              </div>
+              <div className="space-y-3">
+                <div>
+                  <label className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Entrada (Kg)</label>
+                  <input type="number" step="0.01" value={editingLog.input} onChange={e=>{const i=parseFloat(e.target.value)||0; const m=i>0?((i-editingLog.output)/i*100).toFixed(1):0; setEditingLog({...editingLog, input: i, merma: m})}} className="w-full bg-zinc-950 border border-zinc-800 text-white rounded-lg p-3 text-sm outline-none transition-colors focus:border-blue-500"/>
+                </div>
+                <div>
+                  <label className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Salida (Kg)</label>
+                  <input type="number" step="0.01" value={editingLog.output} onChange={e=>{const o=parseFloat(e.target.value)||0; const m=editingLog.input>0?((editingLog.input-o)/editingLog.input*100).toFixed(1):0; setEditingLog({...editingLog, output: o, merma: m})}} className="w-full bg-zinc-950 border border-zinc-800 text-white rounded-lg p-3 text-sm outline-none transition-colors focus:border-blue-500"/>
+                </div>
+                <div className="bg-zinc-950 p-4 rounded-xl border border-zinc-800 flex justify-between items-center">
+                  <span className="text-[10px] text-zinc-500 uppercase font-black tracking-tighter">Nueva Merma Calculada</span>
+                  <span className={`text-xl font-black ${parseFloat(editingLog.merma)>22?'text-red-500':'text-green-400'}`}>{editingLog.merma}%</span>
+                </div>
+              </div>
+              <button onClick={()=>updateLog(editingLog)} className="w-full bg-blue-500 text-white font-black p-4 rounded-xl text-sm tracking-widest hover:bg-blue-400 transition-colors shadow-lg">GUARDAR CAMBIOS</button>
             </div>
           </div>
         )}
