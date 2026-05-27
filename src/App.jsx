@@ -56,6 +56,7 @@ export default function App() {
   const [expenses,       setExpenses]       = useState([]);
   const [processHistory, setProcessHistory] = useState([]);
   const [orders,         setOrders]         = useState([]);
+  const [activeProcesses, setActiveProcesses] = useState([]); // Lotes en Proceso
 
   // --- PAGINACIÓN ---
   const [visibleSales, setVisibleSales] = useState(10);
@@ -112,6 +113,7 @@ export default function App() {
 
   // Fábrica
   const [fAction,       setFAction]       = useState('trilla');
+  const [chartRange,    setChartRange]    = useState('7D'); // 7D, 30D, 1A
   const [fDate,         setFDate]         = useState(todayISO);
   const [producerInput, setProducerInput] = useState('');
   const [fKgIn,         setFKgIn]         = useState('');
@@ -152,6 +154,7 @@ export default function App() {
         if (d.expenses)       setExpenses(d.expenses);
         if (d.processHistory) setProcessHistory(d.processHistory);
         if (d.orders)         setOrders(d.orders);
+        if (d.activeProcesses) setActiveProcesses(d.activeProcesses);
       }
     } catch (e) {
       console.error('Error cargando datos:', e);
@@ -201,6 +204,38 @@ export default function App() {
     }
   };
 
+  const repairData = (dataObj) => {
+    let p = 0, a = 0, t = 0;
+    if (dataObj.purchases) {
+      dataObj.purchases.forEach(comp => {
+        if (comp.coffeeType === 'Pergamino') p += comp.kg;
+        if (comp.coffeeType === 'Azul') a += comp.kg;
+        if (comp.coffeeType === 'Tostado') t += comp.kg;
+      });
+    }
+    if (dataObj.processHistory) {
+      dataObj.processHistory.forEach(log => {
+        if (log.type === 'trilla') {
+          p -= log.input;
+          a += log.output;
+        } else if (log.type === 'tueste') {
+          a -= log.input;
+          t += log.output;
+        }
+      });
+    }
+    if (dataObj.sales) {
+      dataObj.sales.forEach(s => {
+        if (s.kgSold) t -= (s.kgSold * (s.quantity || 1));
+      });
+    }
+    return { 
+      pergamino: round2(Math.max(0, p)), 
+      azul: round2(Math.max(0, a)), 
+      tostado: round2(Math.max(0, t)) 
+    };
+  };
+
   const importData = (event) => {
     const file = event.target.files[0];
     if (!file) return;
@@ -209,8 +244,9 @@ export default function App() {
       try {
         const json = JSON.parse(e.target.result);
         if (json && typeof json === 'object') {
+          json.inventory = repairData(json);
           localStorage.setItem('colados_app_v6', JSON.stringify(json));
-          showToast('¡Datos restaurados! Reiniciando...');
+          showToast('¡Datos restaurados y adaptados! Reiniciando...');
           setTimeout(() => window.location.reload(), 1500);
         }
       } catch { showToast('Error: Archivo de respaldo inválido'); }
@@ -263,9 +299,12 @@ export default function App() {
   //  FACTURA — CANVAS IMAGE
   // ============================================================
   const downloadInvoiceImage = (sale) => {
+    const scale = 3;
     const canvas = document.createElement('canvas');
-    canvas.width  = 400; canvas.height = 620;
+    canvas.width  = 400 * scale; 
+    canvas.height = 620 * scale;
     const ctx = canvas.getContext('2d');
+    ctx.scale(scale, scale);
 
     const logo = new Image();
     logo.src = logoBase64; 
@@ -635,11 +674,11 @@ export default function App() {
                 <div className="grid grid-cols-2 gap-3">
                   <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Fecha</label><input type="date" value={vDate} onChange={e=>setVDate(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 text-sm font-bold" required/></div>
                   <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Cliente</label>
-                    <select value={vClient} onChange={e=>setVClient(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 text-sm" required>
-                      <option value="">Seleccione...</option>
-                      {clients.map(c=><option key={c.id} value={c.fullName}>{c.fullName}</option>)}
-                      <option value="Cliente Ocasional">Cliente Ocasional</option>
-                    </select>
+                    <input list="clients-list" value={vClient} onChange={e=>setVClient(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 text-sm" placeholder="Escribir o buscar..." required />
+                    <datalist id="clients-list">
+                      {clients.slice().sort((a,b)=>a.fullName.localeCompare(b.fullName)).map(c=><option key={c.id} value={c.fullName} />)}
+                      <option value="Cliente Ocasional" />
+                    </datalist>
                   </div>
                 </div>
                 <div className="grid grid-cols-12 gap-3">
@@ -684,18 +723,18 @@ export default function App() {
                 <div className="grid grid-cols-2 gap-3">
                   <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Para el (Fecha)</label><input type="date" value={orderDate} onChange={e=>setOrderDate(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 text-sm font-bold" required/></div>
                   <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Cliente</label>
-                    <select value={vClient} onChange={e=>setVClient(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 text-sm" required>
-                      <option value="">Seleccione...</option>
-                      {clients.map(c=><option key={c.id} value={c.fullName}>{c.fullName}</option>)}
-                      <option value="Cliente Ocasional">Cliente Ocasional</option>
-                    </select>
+                    <input list="clients-list-orders" value={vClient} onChange={e=>setVClient(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 text-sm" placeholder="Escribir o buscar..." required />
+                    <datalist id="clients-list-orders">
+                      {clients.slice().sort((a,b)=>a.fullName.localeCompare(b.fullName)).map(c=><option key={c.id} value={c.fullName} />)}
+                      <option value="Cliente Ocasional" />
+                    </datalist>
                   </div>
                 </div>
                 <div className="grid grid-cols-12 gap-3">
-                  <div className="col-span-8"><label className="text-[10px] text-zinc-400 font-bold uppercase">Producto</label>
+                  <div className="col-span-8"><label className="text-[10px] text-zinc-400 font-bold uppercase">Producto (Solo Empacado)</label>
                     <select value={vProduct} onChange={e=>setVProduct(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 text-sm" required>
                       <option value="">Tipo de café...</option>
-                      {catalog.map(c=><option key={c.id} value={c.name}>{c.name}</option>)}
+                      {catalog.filter(c=>c.bagType === 'bolsas_kraft').map(c=><option key={c.id} value={c.name}>{c.name}</option>)}
                     </select>
                   </div>
                   <div className="col-span-4"><label className="text-[10px] text-zinc-400 font-bold uppercase">Cant.</label><input type="number" min="1" value={vQuantity} onChange={e=>setVQuantity(parseInt(e.target.value)||1)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white font-bold mt-1 text-sm text-center" required/></div>
@@ -828,10 +867,10 @@ export default function App() {
                 </div>
               </div>
               <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Productor / Finca</label>
-                <select value={cProducer} onChange={e=>setCProducer(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 text-sm" required>
-                  <option value="">Seleccione...</option>
-                  {producers.map(p=>{const n=typeof p==='string'?p:p.name; const f=typeof p==='string'?'':p.finca; return <option key={typeof p==='string'?p:p.id} value={n}>{n}{f?` (${f})`:''}</option>;})}
-                </select>
+                <input list="producers-list" value={cProducer} onChange={e=>setCProducer(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 text-sm" placeholder="Escribir o buscar productor..." required />
+                <datalist id="producers-list">
+                  {producers.slice().sort((a,b)=>{const nA=typeof a==='string'?a:a.name; const nB=typeof b==='string'?b:b.name; return nA.localeCompare(nB);}).map(p=>{const n=typeof p==='string'?p:p.name; const f=typeof p==='string'?'':p.finca; return <option key={typeof p==='string'?p:p.id} value={n}>{f?`${n} (${f})`:n}</option>;})}
+                </datalist>
               </div>
               <div className="grid grid-cols-2 gap-3 p-3 bg-zinc-950 rounded-lg border border-yellow-400/30">
                 <div><label className="text-[10px] text-yellow-400 font-bold uppercase">Kilos (KG)</label><input type="number" step="0.01" value={cKg} onChange={e=>setCKg(e.target.value)} className="w-full p-3 bg-zinc-900 border border-zinc-700 rounded-lg text-white font-black mt-1" required placeholder="0.00"/></div>
@@ -943,6 +982,25 @@ export default function App() {
       ? (((parseFloat(fKgIn) - parseFloat(fKgOut)) / parseFloat(fKgIn)) * 100).toFixed(1)
       : '0.0';
 
+    const getProducerStock = (prodName, actionType) => {
+      let stock = 0;
+      const coffeeType = actionType === 'trilla' ? 'Pergamino' : 'Azul';
+      purchases.forEach(p => { if (p.producer === prodName && p.coffeeType === coffeeType) stock += p.kg; });
+      processHistory.forEach(log => {
+        if (log.producer === prodName) {
+           if (coffeeType === 'Pergamino' && log.type === 'trilla') stock -= log.input;
+           if (coffeeType === 'Azul' && log.type === 'trilla') stock += log.output;
+           if (coffeeType === 'Azul' && log.type === 'tueste') stock -= log.input;
+        }
+      });
+      return round2(Math.max(0, stock));
+    };
+
+    const filteredProducers = producers.map(p => {
+      const name = typeof p === 'string' ? p : p.name;
+      return { name, stock: getProducerStock(name, fAction) };
+    }).filter(p => p.stock > 0);
+
     const handleProcess = (e) => {
       e.preventDefault();
       const input = parseFloat(fKgIn); const output = parseFloat(fKgOut);
@@ -975,6 +1033,30 @@ export default function App() {
       showToast('✅ Lote procesado');
     };
 
+    const handleSaveProcess = () => {
+      const input = parseFloat(fKgIn);
+      if (isNaN(input) || input <= 0) { showToast('⚠️ Ingrese el Peso Bruto'); return; }
+      const prodName = typeof producerInput === 'string' ? producerInput : producerInput.name;
+      if (!prodName) { showToast('⚠️ Seleccione Productor'); return; }
+
+      const newInv = { ...inventory };
+      if (fAction === 'trilla') {
+        if (input > newInv.pergamino) { showToast('⚠️ Stock insuficiente'); return; }
+        newInv.pergamino = round2(newInv.pergamino - input); 
+      } else {
+        if (input > newInv.azul) { showToast('⚠️ Stock insuficiente'); return; }
+        newInv.azul = round2(newInv.azul - input); 
+      }
+
+      const active = { id: Date.now(), type: fAction, producer: prodName, input, date: formatDate(fDate) };
+      const newActive = [active, ...activeProcesses];
+      setActiveProcesses(newActive);
+      setInventory(newInv);
+      guardarLocal({ activeProcesses: newActive, inventory: newInv });
+      setFKgIn(''); setProducerInput('');
+      showToast('⏳ Lote en curso guardado');
+    };
+
     return (
       <div className="p-4 space-y-4 animate-in fade-in duration-300">
         {/* STOCK CARDS */}
@@ -999,15 +1081,42 @@ export default function App() {
           <button onClick={()=>setFAction('tueste')} className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all ${fAction==='tueste'?'bg-orange-900/40 text-orange-400':'text-zinc-500'}`}>2. TOSTAR 🔥</button>
         </div>
 
+        {activeProcesses.length > 0 && (
+          <div className="bg-blue-900/20 border border-blue-500/30 p-4 rounded-xl">
+            <h3 className="text-xs font-bold text-blue-400 mb-3 uppercase flex items-center gap-2"><Clock size={14}/>Lotes en Proceso ({activeProcesses.length})</h3>
+            <div className="space-y-2">
+              {activeProcesses.map(ap => (
+                <div key={ap.id} className="bg-zinc-950 p-3 rounded-lg border border-blue-500/20 flex justify-between items-center">
+                  <div>
+                    <p className="font-bold text-zinc-200 text-xs">{ap.type==='trilla'?'Trilla':'Tueste'} — {ap.producer}</p>
+                    <p className="text-[9px] text-zinc-500">Entrada: {ap.input}kg • {ap.date}</p>
+                  </div>
+                  <button onClick={() => {
+                    setFAction(ap.type);
+                    setProducerInput(ap.producer);
+                    setFKgIn(ap.input);
+                    const newInv = {...inventory};
+                    if (ap.type === 'trilla') newInv.pergamino += ap.input;
+                    else newInv.azul += ap.input;
+                    const newActive = activeProcesses.filter(x => x.id !== ap.id);
+                    setActiveProcesses(newActive); setInventory(newInv);
+                    guardarLocal({ activeProcesses: newActive, inventory: newInv });
+                  }} className="bg-blue-500 hover:bg-blue-400 text-white px-3 py-1.5 rounded text-[10px] font-black transition-colors">CONTINUAR</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* FORMULARIO */}
         <div className="bg-zinc-900 border border-zinc-800 p-5 rounded-xl">
           <form onSubmit={handleProcess} className="space-y-4">
             <div className="grid grid-cols-2 gap-3">
               <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Fecha Proceso</label><input type="date" value={fDate} onChange={e=>setFDate(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 text-sm font-bold" required/></div>
-              <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Productor / Lote</label>
+              <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Productor (Con Stock)</label>
                 <select value={producerInput} onChange={e=>setProducerInput(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 text-sm" required>
                   <option value="">Seleccione...</option>
-                  {producers.map(p=>{const n=typeof p==='string'?p:p.name; return <option key={typeof p==='string'?p:p.id} value={n}>{n}</option>;})}
+                  {filteredProducers.map(p=><option key={p.name} value={p.name}>{p.name} ({p.stock.toFixed(1)}kg)</option>)}
                 </select>
               </div>
             </div>
@@ -1020,9 +1129,14 @@ export default function App() {
               <span className="text-xs text-zinc-500 font-medium">Merma del lote:</span>
               <span className={`text-xl font-black ${parseFloat(currentMerma)>22?'text-red-500':'text-green-400'}`}>{currentMerma}%</span>
             </div>
-            <button type="submit" className="w-full bg-zinc-800 hover:bg-zinc-700 text-white border border-zinc-700 font-black py-4 rounded-xl flex justify-center items-center gap-2 text-sm tracking-widest">
-              <Factory size={18}/>PROCESAR LOTE
-            </button>
+            <div className="flex gap-2 mt-4">
+              <button type="button" onClick={handleSaveProcess} className="flex-1 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 border border-blue-500/30 font-black py-4 rounded-xl flex justify-center items-center gap-2 text-xs tracking-widest transition-colors">
+                <Clock size={16}/>EN CURSO
+              </button>
+              <button type="submit" className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-white border border-zinc-700 font-black py-4 rounded-xl flex justify-center items-center gap-2 text-xs tracking-widest transition-colors">
+                <Factory size={16}/>FINALIZAR
+              </button>
+            </div>
           </form>
         </div>
 
@@ -1093,15 +1207,34 @@ export default function App() {
     const donationsCount = sales.filter(s => s.method === 'Donación').length;
     const kgDonated      = sales.filter(s => s.method === 'Donación').reduce((a, s) => a + (s.kgSold || 0), 0);
 
-    // ✅ Gráfico usa COP (no USD)
-    const last7 = Array.from({length:7}, (_, i) => {
-      const d = new Date(); d.setDate(d.getDate() - i);
-      return formatDate(d.toISOString().split('T')[0]);
-    }).reverse();
-    const chartData = last7.map(date => ({
-      date: date.substring(0, 5),
-      total: sales.filter(s => s.date === date).reduce((a, b) => a + (b.cop || 0), 0)
-    }));
+    // ✅ Gráfico dinámico
+    let rangeDays = 7;
+    if (chartRange === '30D') rangeDays = 30;
+    
+    let chartData = [];
+    if (chartRange !== '1A') {
+      const dates = Array.from({length:rangeDays}, (_, i) => {
+        const d = new Date(); d.setDate(d.getDate() - i);
+        return formatDate(d.toISOString().split('T')[0]);
+      }).reverse();
+      chartData = dates.map(date => ({
+        label: date.substring(0, 5),
+        total: sales.filter(s => s.date === date).reduce((a, b) => a + (b.cop || 0), 0)
+      }));
+    } else {
+      const months = Array.from({length:12}, (_, i) => {
+        const d = new Date(); d.setMonth(d.getMonth() - i);
+        return { m: d.getMonth()+1, y: d.getFullYear(), name: d.toLocaleString('es', {month:'short'}).substring(0,3).toUpperCase() };
+      }).reverse();
+      chartData = months.map(month => {
+        const total = sales.filter(s => {
+          if (!s.isoDate) return false;
+          const sd = new Date(s.isoDate);
+          return (sd.getMonth()+1) === month.m && sd.getFullYear() === month.y;
+        }).reduce((a,b) => a + (b.cop || 0), 0);
+        return { label: month.name, total };
+      });
+    }
     const maxChart = Math.max(...chartData.map(d => d.total), 1);
 
     // ✅ markPaid usa COP (no USD) para evitar mezcla de monedas
@@ -1135,19 +1268,26 @@ export default function App() {
               </div>
             )}
 
-            {/* GRÁFICO 7 DÍAS */}
+            {/* GRÁFICO TENDENCIAS */}
             <div className="bg-zinc-900 rounded-2xl p-5 shadow-xl border border-zinc-800">
-              <h3 className="text-[10px] font-bold text-yellow-400 uppercase tracking-widest mb-4 flex items-center gap-1"><BarChart3 size={14}/>Tendencia 7 Días {showUSD ? '(USD)' : '(COP)'}</h3>
-              <div className="flex items-end justify-between h-28 gap-1">
+              <h3 className="text-[10px] font-bold text-yellow-400 uppercase tracking-widest mb-4 flex items-center justify-between">
+                <span className="flex items-center gap-1"><BarChart3 size={14}/>Tendencia {showUSD ? '(USD)' : '(COP)'}</span>
+                <div className="flex gap-1 bg-zinc-950 p-0.5 rounded">
+                  <button onClick={()=>setChartRange('7D')} className={`px-2 py-0.5 rounded text-[8px] ${chartRange==='7D'?'bg-zinc-800 text-yellow-400':'text-zinc-500'}`}>7D</button>
+                  <button onClick={()=>setChartRange('30D')} className={`px-2 py-0.5 rounded text-[8px] ${chartRange==='30D'?'bg-zinc-800 text-yellow-400':'text-zinc-500'}`}>30D</button>
+                  <button onClick={()=>setChartRange('1A')} className={`px-2 py-0.5 rounded text-[8px] ${chartRange==='1A'?'bg-zinc-800 text-yellow-400':'text-zinc-500'}`}>1A</button>
+                </div>
+              </h3>
+              <div className="flex items-end justify-between h-28 gap-1 overflow-x-auto no-scrollbar pb-2">
                 {chartData.map((data,i)=>{
                   const h=(data.total/maxChart)*100;
                   return (
-                    <div key={i} className="flex flex-col items-center w-full group">
-                      <div className="text-[8px] text-zinc-400 mb-1 opacity-0 group-hover:opacity-100 transition-opacity">{showUSD ? `$${(data.total/rates.usd_cop).toFixed(0)}` : `$${Math.round(data.total/1000)}k`}</div>
+                    <div key={i} className="flex flex-col items-center flex-1 min-w-[20px] group">
+                      <div className="text-[8px] text-zinc-400 mb-1 opacity-0 group-hover:opacity-100 transition-opacity absolute -mt-4">{showUSD ? `$${(data.total/rates.usd_cop).toFixed(0)}` : `$${Math.round(data.total/1000)}k`}</div>
                       <div className="w-full bg-yellow-400/20 rounded-t-sm" style={{height:'80px',display:'flex',alignItems:'flex-end'}}>
                         <div className="w-full bg-yellow-400 rounded-t-sm transition-all duration-500" style={{height:`${h}%`,minHeight:data.total>0?'4px':'0px'}}/>
                       </div>
-                      <div className="text-[8px] text-zinc-500 mt-1 font-bold">{data.date}</div>
+                      <div className="text-[8px] text-zinc-500 mt-1 font-bold truncate max-w-full">{data.label}</div>
                     </div>
                   );
                 })}
@@ -1409,10 +1549,16 @@ export default function App() {
               <div className="bg-zinc-900 p-4 rounded-xl border border-yellow-400/50">
                 <h3 className="text-sm font-bold text-yellow-400 mb-2 flex items-center gap-2"><Database size={16}/>Respaldo Offline</h3>
                 <p className="text-[10px] text-zinc-400 mb-4">Tu información vive en este dispositivo. Exporta un respaldo regularmente.</p>
-                <div className="flex gap-3">
+                <div className="flex gap-3 mb-2">
                   <button onClick={exportData} className="flex-1 bg-zinc-800 text-yellow-400 p-3 rounded-lg text-[10px] font-black border border-yellow-400/30 flex justify-center items-center gap-1"><Download size={14}/>EXPORTAR</button>
                   <label className="flex-1 bg-yellow-400 text-zinc-900 p-3 rounded-lg text-[10px] font-black flex justify-center items-center gap-1 cursor-pointer"><Save size={14}/>IMPORTAR<input type="file" accept=".json" className="hidden" onChange={importData}/></label>
                 </div>
+                <button onClick={()=>{
+                  const inv = repairData({purchases, processHistory, sales});
+                  setInventory(inv);
+                  guardarLocal({inventory: inv});
+                  showToast('¡Datos re-calculados y adaptados con éxito!');
+                }} className="w-full bg-blue-500/20 text-blue-400 hover:bg-blue-500 hover:text-white p-3 rounded-lg text-[10px] font-black border border-blue-500/30 flex justify-center items-center gap-1 transition-colors">🛠️ ADAPTAR / REPARAR DATOS (v7.4)</button>
               </div>
               <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
                 <h3 className="text-sm font-bold text-yellow-400 mb-3 flex items-center gap-2"><Package size={16}/>Precios ($)</h3>
