@@ -106,6 +106,7 @@ export default function App() {
 
   const [vStickerType, setVStickerType] = useState('grande');
   const [balanceSubTab, setBalanceSubTab] = useState('general');
+  const [showUSD, setShowUSD] = useState(false);
   const [editingSale, setEditingSale] = useState(null);
   const [editingLog, setEditingLog] = useState(null);
 
@@ -481,8 +482,8 @@ export default function App() {
   };
 
   const renderVentas = () => {
-    const bs  = vAmountUSD ? (parseFloat(vAmountUSD) * rates.bs).toFixed(2)  : '0.00';
-    const cop = vAmountUSD ? (parseFloat(vAmountUSD) * rates.cop).toFixed(0) : '0';
+    const usdDisplay = vAmountUSD ? (parseFloat(vAmountUSD) / rates.usd_cop).toFixed(2) : '0.00';
+    const bsDisplay  = vAmountUSD ? (parseFloat(vAmountUSD) * rates.cop_bs).toFixed(2)  : '0.00';
 
     const handleQuickProduct = (p) => {
       setVProduct(p.name);
@@ -649,8 +650,8 @@ export default function App() {
                 </div>
                 <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Monto (COP)</label><input type="number" step="50" value={vAmountUSD} onChange={e=>setVAmountUSD(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-yellow-400 font-black mt-1 text-lg" required placeholder="0"/></div>
                 <div className="flex gap-2">
-                  <div className="flex-1 bg-zinc-950 p-2 rounded-lg text-center border border-zinc-800"><span className="text-[10px] text-zinc-500 block">USD</span><span className="text-white text-xs font-bold">${vAmountUSD ? (parseFloat(vAmountUSD) / rates.usd_cop).toFixed(2) : '0.00'}</span></div>
-                  <div className="flex-1 bg-zinc-950 p-2 rounded-lg text-center border border-zinc-800"><span className="text-[10px] text-zinc-500 block">BS</span><span className="text-white text-xs font-bold">{vAmountUSD ? (parseFloat(vAmountUSD) * rates.cop_bs).toFixed(2) : '0.00'}</span></div>
+                  <div className="flex-1 bg-zinc-950 p-2 rounded-lg text-center border border-zinc-800"><span className="text-[10px] text-zinc-500 block">USD</span><span className="text-white text-xs font-bold">{usdDisplay}</span></div>
+                  <div className="flex-1 bg-zinc-950 p-2 rounded-lg text-center border border-zinc-800"><span className="text-[10px] text-zinc-500 block">BS</span><span className="text-white text-xs font-bold">{bsDisplay}</span></div>
                 </div>
                 <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Forma de Pago</label>
                   <select value={vMethod} onChange={e=>setVMethod(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 font-bold text-sm">
@@ -895,7 +896,7 @@ export default function App() {
                       <p className="text-[9px] text-zinc-500">{p.date} • {p.method} • <span className={p.isPaid?'text-green-400':'text-orange-400'}>{p.isPaid?'Pagado':'Crédito'}</span></p>
                     </div>
                     <div className="flex items-center gap-2">
-                      <span className="font-black text-sm text-red-400">-${p.usd.toFixed(2)}</span>
+                      <span className="font-black text-sm text-red-400">-${(p.cop||0).toLocaleString('es-CO')} COP</span>
                       <button onClick={()=>deletePurchase(p.id)} className="text-zinc-700 hover:text-red-500"><Trash2 size={13}/></button>
                     </div>
                   </div>
@@ -921,7 +922,7 @@ export default function App() {
                       <p className="text-[9px] text-zinc-500">{e.date} • {e.originalAmount} {e.originalCurrency}</p>
                     </div>
                     <div className="flex items-center gap-2">
-                      <span className="font-black text-sm text-red-400">-${e.usd.toFixed(2)}</span>
+                      <span className="font-black text-sm text-red-400">-${(e.cop||0).toLocaleString('es-CO')} COP</span>
                       <button onClick={()=>deleteExpense(e.id)} className="text-zinc-700 hover:text-red-500"><Trash2 size={13}/></button>
                     </div>
                   </div>
@@ -1061,24 +1062,52 @@ export default function App() {
   //  RENDER: BALANCE
   // ============================================================
   const renderBalance = () => {
-    const ingresosCOP   = sales.filter(s=>(s.isPaid||(s.paidAmount>0)) && s.method !== 'Donación').reduce((a,s)=>a+(s.paidAmount||s.cop),0);
-    const opexCOP       = expenses.reduce((a,e)=>a+e.cop,0);
-    const comprasMPCOP  = purchases.filter(p=>p.isPaid||(p.paidAmount>0)).reduce((a,p)=>a+(p.paidAmount||p.cop),0);
-    const netPnL        = ingresosCOP - opexCOP - comprasMPCOP;
-    const cxCobrar      = sales.filter(s=>!s.isPaid && s.cop>(s.paidAmount||0));
-    const cxPagar       = purchases.filter(p=>!p.isPaid && p.cop>(p.paidAmount||0));
-    const ticketPromedio= sales.filter(s=>s.method !== 'Donación').length>0 ? sales.filter(s=>s.method !== 'Donación').reduce((a,b)=>a+b.cop,0)/sales.filter(s=>s.method !== 'Donación').length : 0;
-    
+    // Función formateadora de moneda (COP por defecto, USD con toggle)
+    const fmt = (cop) => showUSD
+      ? `USD ${(cop / rates.usd_cop).toFixed(2)}`
+      : `$${Math.round(cop).toLocaleString('es-CO')}`;
+
+    // ✅ Ingresos: solo ventas pagadas o con abono, excluyendo donaciones
+    const ingresosCOP   = sales
+      .filter(s => s.method !== 'Donación' && (s.isPaid || (s.paidAmount || 0) > 0))
+      .reduce((a, s) => a + (s.paidAmount || s.cop || 0), 0);
+
+    // ✅ Costos operativos y materia prima (en COP)
+    const opexCOP      = expenses.reduce((a, e) => a + (e.cop || 0), 0);
+    const comprasMPCOP = purchases
+      .filter(p => p.isPaid || (p.paidAmount || 0) > 0)
+      .reduce((a, p) => a + (p.paidAmount || p.cop || 0), 0);
+
+    const netPnL = ingresosCOP - opexCOP - comprasMPCOP;
+
+    // ✅ Cuentas por cobrar y por pagar (comparación correcta en COP)
+    const cxCobrar = sales.filter(s => !s.isPaid && (s.cop || 0) > (s.paidAmount || 0));
+    const cxPagar  = purchases.filter(p => !p.isPaid && (p.cop || 0) > (p.paidAmount || 0));
+
+    // ✅ Ticket promedio en COP
+    const ventasReales = sales.filter(s => s.method !== 'Donación');
+    const ticketPromedio = ventasReales.length > 0
+      ? ventasReales.reduce((a, b) => a + (b.cop || 0), 0) / ventasReales.length
+      : 0;
+
     const donationsCount = sales.filter(s => s.method === 'Donación').length;
-    const kgDonated = sales.filter(s => s.method === 'Donación').reduce((a,s) => a + (s.kgSold || 0), 0);
+    const kgDonated      = sales.filter(s => s.method === 'Donación').reduce((a, s) => a + (s.kgSold || 0), 0);
 
-    const last7 = Array.from({length:7},(_,i)=>{const d=new Date();d.setDate(d.getDate()-i);return formatDate(d.toISOString().split('T')[0]);}).reverse();
-    const chartData = last7.map(date=>({date:date.substring(0,5), total:sales.filter(s=>s.date===date).reduce((a,b)=>a+b.usd,0)}));
-    const maxChart  = Math.max(...chartData.map(d=>d.total),1);
+    // ✅ Gráfico usa COP (no USD)
+    const last7 = Array.from({length:7}, (_, i) => {
+      const d = new Date(); d.setDate(d.getDate() - i);
+      return formatDate(d.toISOString().split('T')[0]);
+    }).reverse();
+    const chartData = last7.map(date => ({
+      date: date.substring(0, 5),
+      total: sales.filter(s => s.date === date).reduce((a, b) => a + (b.cop || 0), 0)
+    }));
+    const maxChart = Math.max(...chartData.map(d => d.total), 1);
 
-    const markPaid = (item,type) => {
-      const pending = item.usd-(item.paidAmount||0);
-      setPromptModal({isOpen:true,id:item.id,type,method:'Efectivo COP',amount:pending,maxAmount:pending});
+    // ✅ markPaid usa COP (no USD) para evitar mezcla de monedas
+    const markPaid = (item, type) => {
+      const pending = (item.cop || 0) - (item.paidAmount || 0);
+      setPromptModal({ isOpen: true, id: item.id, type, method: 'Efectivo COP', amount: pending, maxAmount: pending });
     };
 
     return (
@@ -1108,13 +1137,13 @@ export default function App() {
 
             {/* GRÁFICO 7 DÍAS */}
             <div className="bg-zinc-900 rounded-2xl p-5 shadow-xl border border-zinc-800">
-              <h3 className="text-[10px] font-bold text-yellow-400 uppercase tracking-widest mb-4 flex items-center gap-1"><BarChart3 size={14}/>Tendencia (7 Días)</h3>
+              <h3 className="text-[10px] font-bold text-yellow-400 uppercase tracking-widest mb-4 flex items-center gap-1"><BarChart3 size={14}/>Tendencia 7 Días {showUSD ? '(USD)' : '(COP)'}</h3>
               <div className="flex items-end justify-between h-28 gap-1">
                 {chartData.map((data,i)=>{
                   const h=(data.total/maxChart)*100;
                   return (
                     <div key={i} className="flex flex-col items-center w-full group">
-                      <div className="text-[8px] text-zinc-400 mb-1 opacity-0 group-hover:opacity-100 transition-opacity">${data.total.toFixed(0)}</div>
+                      <div className="text-[8px] text-zinc-400 mb-1 opacity-0 group-hover:opacity-100 transition-opacity">{showUSD ? `$${(data.total/rates.usd_cop).toFixed(0)}` : `$${Math.round(data.total/1000)}k`}</div>
                       <div className="w-full bg-yellow-400/20 rounded-t-sm" style={{height:'80px',display:'flex',alignItems:'flex-end'}}>
                         <div className="w-full bg-yellow-400 rounded-t-sm transition-all duration-500" style={{height:`${h}%`,minHeight:data.total>0?'4px':'0px'}}/>
                       </div>
@@ -1128,16 +1157,16 @@ export default function App() {
             {/* PnL CARD */}
             <div className="bg-zinc-900 rounded-2xl p-6 shadow-xl border border-zinc-800 relative overflow-hidden">
               <TrendingUp size={100} className="absolute -bottom-4 -right-4 text-yellow-400 opacity-5"/>
-              <p className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">Balance Neto (Base COP)</p>
-              <div className={`text-4xl font-black mt-1 ${netPnL>=0?'text-white':'text-red-400'}`}>${netPnL.toLocaleString('es-CO')}</div>
+              <p className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">Balance Neto — {showUSD ? 'USD' : 'COP'}</p>
+              <div className={`text-4xl font-black mt-1 ${netPnL>=0?'text-white':'text-red-400'}`}>{fmt(netPnL)}</div>
               <div className="grid grid-cols-3 gap-2 border-t border-zinc-800 pt-3 mt-3">
-                <div><p className="text-[8px] text-zinc-500 uppercase">Ingresos</p><p className="font-bold text-green-400 text-xs">+{ingresosCOP.toLocaleString('es-CO')}</p></div>
-                <div><p className="text-[8px] text-zinc-500 uppercase">Compras MP</p><p className="font-bold text-red-400 text-xs">-{comprasMPCOP.toLocaleString('es-CO')}</p></div>
-                <div><p className="text-[8px] text-zinc-500 uppercase">OPEX</p><p className="font-bold text-orange-400 text-xs">-{opexCOP.toLocaleString('es-CO')}</p></div>
+                <div><p className="text-[8px] text-zinc-500 uppercase">Ingresos</p><p className="font-bold text-green-400 text-xs">+{fmt(ingresosCOP)}</p></div>
+                <div><p className="text-[8px] text-zinc-500 uppercase">Compras MP</p><p className="font-bold text-red-400 text-xs">-{fmt(comprasMPCOP)}</p></div>
+                <div><p className="text-[8px] text-zinc-500 uppercase">OPEX</p><p className="font-bold text-orange-400 text-xs">-{fmt(opexCOP)}</p></div>
               </div>
               <div className="grid grid-cols-2 gap-2 border-t border-zinc-800 pt-3 mt-3">
-                <div><p className="text-[8px] text-zinc-500 uppercase flex items-center gap-1"><Target size={10}/>Ticket Prom.</p><p className="font-bold text-yellow-400 text-xs">${ticketPromedio.toLocaleString('es-CO')}</p></div>
-                <div><p className="text-[8px] text-zinc-500 uppercase flex items-center gap-1"><PieChart size={10}/>Total Ventas</p><p className="font-bold text-green-400 text-xs">+{sales.reduce((a,b)=>a+b.cop,0).toLocaleString('es-CO')}</p></div>
+                <div><p className="text-[8px] text-zinc-500 uppercase flex items-center gap-1"><Target size={10}/>Ticket Prom.</p><p className="font-bold text-yellow-400 text-xs">{fmt(ticketPromedio)}</p></div>
+                <div><p className="text-[8px] text-zinc-500 uppercase flex items-center gap-1"><PieChart size={10}/>Total Ventas</p><p className="font-bold text-green-400 text-xs">+{fmt(sales.reduce((a,b)=>a+(b.cop||0),0))}</p></div>
               </div>
               <div className="mt-3 pt-3 border-t border-zinc-800 flex justify-between items-center">
                 <p className="text-[8px] text-zinc-500 uppercase flex items-center gap-1"><Coffee size={10}/>Donaciones</p>
@@ -1149,14 +1178,14 @@ export default function App() {
             <div className="grid grid-cols-2 gap-4">
               <div className="bg-zinc-900 border border-orange-500/30 rounded-xl p-4">
                 <h3 className="text-[10px] font-bold text-orange-400 uppercase tracking-widest mb-2 flex items-center gap-1"><ArrowRightLeft size={12}/>A COBRAR</h3>
-                <div className="text-xl font-black text-white mb-2">${cxCobrar.reduce((a,c)=>a+(c.cop-(c.paidAmount||0)),0).toLocaleString('es-CO')}</div>
+                <div className="text-xl font-black text-white mb-2">{fmt(cxCobrar.reduce((a,c)=>a+((c.cop||0)-(c.paidAmount||0)),0))}</div>
                 <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
                   {cxCobrar.length===0 && <p className="text-[10px] text-zinc-600">Sin cuentas pendientes</p>}
                   {cxCobrar.map(c=>{
-                    const pending=c.cop-(c.paidAmount||0); const over=isOverdue(c.isoDate);
+                    const pending=(c.cop||0)-(c.paidAmount||0); const over=isOverdue(c.isoDate);
                     return (
                       <div key={c.id} className={`bg-zinc-950 p-2 rounded border flex justify-between items-center ${over?'border-red-900/50':'border-zinc-800'}`}>
-                        <div><p className="text-[10px] font-bold text-zinc-300 truncate w-20 flex items-center gap-1">{over&&<Flag size={8} className="text-red-500"/>}{c.clientName}</p><p className="text-[8px] text-orange-400">${pending.toLocaleString('es-CO')}</p></div>
+                        <div><p className="text-[10px] font-bold text-zinc-300 truncate w-20 flex items-center gap-1">{over&&<Flag size={8} className="text-red-500"/>}{c.clientName}</p><p className="text-[8px] text-orange-400">{fmt(pending)}</p></div>
                         <button onClick={()=>markPaid(c,'cxc')} className="text-[8px] bg-green-900/30 text-green-400 px-2 py-1 rounded font-bold">ABONAR</button>
                       </div>
                     );
@@ -1165,14 +1194,14 @@ export default function App() {
               </div>
               <div className="bg-zinc-900 border border-red-500/30 rounded-xl p-4">
                 <h3 className="text-[10px] font-bold text-red-400 uppercase tracking-widest mb-2 flex items-center gap-1"><BookOpen size={12}/>A PAGAR</h3>
-                <div className="text-xl font-black text-white mb-2">${cxPagar.reduce((a,p)=>a+(p.cop-(p.paidAmount||0)),0).toLocaleString('es-CO')}</div>
+                <div className="text-xl font-black text-white mb-2">{fmt(cxPagar.reduce((a,p)=>a+((p.cop||0)-(p.paidAmount||0)),0))}</div>
                 <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
                   {cxPagar.length===0 && <p className="text-[10px] text-zinc-600">Sin deudas pendientes</p>}
                   {cxPagar.map(p=>{
-                    const pending=p.cop-(p.paidAmount||0);
+                    const pending=(p.cop||0)-(p.paidAmount||0);
                     return (
                       <div key={p.id} className="bg-zinc-950 p-2 rounded border border-zinc-800 flex justify-between items-center">
-                        <div><p className="text-[10px] font-bold text-zinc-300 truncate w-20">{p.producer}</p><p className="text-[8px] text-red-400">${pending.toLocaleString('es-CO')}</p></div>
+                        <div><p className="text-[10px] font-bold text-zinc-300 truncate w-20">{p.producer}</p><p className="text-[8px] text-red-400">{fmt(pending)}</p></div>
                         <button onClick={()=>markPaid(p,'cxp')} className="text-[8px] bg-red-900/30 text-red-400 px-2 py-1 rounded font-bold">ABONAR</button>
                       </div>
                     );
@@ -1187,12 +1216,12 @@ export default function App() {
               {sales.length===0 && <p className="text-xs text-zinc-600 text-center py-4">Aún no hay ventas registradas</p>}
               <div className="space-y-2">
                 {sales.slice(0,visibleSales).map(s=>{
-                  const statusText = s.isPaid ? 'Pagado' : (s.paidAmount>0 ? `Abonó $${s.paidAmount.toFixed(2)}` : 'Fiado');
+                  const statusText = s.isPaid ? 'Pagado' : (s.paidAmount>0 ? `Abonó $${(s.paidAmount||0).toLocaleString('es-CO')}` : 'Fiado');
                   return (
                     <div key={s.id} className="bg-zinc-900 p-3 rounded-xl border border-zinc-800 flex justify-between items-center">
                       <div><p className="font-bold text-zinc-200 text-xs">{s.quantity||1}x {s.product}</p><p className="text-[9px] text-zinc-500">{s.date} • {s.clientName} • {statusText}</p></div>
                       <div className="flex items-center gap-2">
-                        <span className={`font-black text-sm ${s.isPaid?'text-green-400':'text-orange-400'}`}>+${s.usd.toFixed(2)}</span>
+                        <span className={`font-black text-sm ${s.isPaid?'text-green-400':'text-orange-400'}`}>+{fmt(s.cop||0)}</span>
                         <button onClick={()=>openInvoice(s)} className="text-yellow-400/50 hover:text-yellow-400"><Share2 size={15}/></button>
                         <button onClick={()=>setEditingSale(s)} className="text-zinc-700 hover:text-yellow-400"><Edit3 size={13}/></button>
                         <button onClick={()=>deleteSale(s.id)} className="text-zinc-700 hover:text-red-500"><Trash2 size={13}/></button>
@@ -1326,10 +1355,22 @@ export default function App() {
             <div>
               <h1 className="text-xl font-black tracking-widest leading-none text-white">COLADOS</h1>
               <p className="text-[9px] text-zinc-400 tracking-[0.2em] mt-0.5 font-bold">BY HARVEY CÁRDENAS</p>
-              <p className="text-[9px] text-yellow-400 tracking-[0.2em] font-bold">V7.2 · OFFLINE-FIRST PWA</p>
+              <p className="text-[9px] text-yellow-400 tracking-[0.2em] font-bold">V7.3 · OFFLINE-FIRST PWA</p>
             </div>
           </div>
-          <button onClick={()=>setShowSettings(true)} className="p-2 text-zinc-400 hover:text-yellow-400 bg-zinc-800 rounded-full transition-colors"><Settings size={20}/></button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowUSD(v => !v)}
+              className={`px-3 py-1.5 rounded-lg text-[10px] font-black border transition-all ${
+                showUSD
+                  ? 'bg-blue-500 text-white border-blue-400 shadow-lg shadow-blue-500/20'
+                  : 'bg-zinc-800 text-yellow-400 border-zinc-700 hover:border-yellow-400/50'
+              }`}
+            >
+              {showUSD ? '🇺🇸 USD' : '🇨🇴 COP'}
+            </button>
+            <button onClick={()=>setShowSettings(true)} className="p-2 text-zinc-400 hover:text-yellow-400 bg-zinc-800 rounded-full transition-colors"><Settings size={20}/></button>
+          </div>
         </header>
 
         {/* ALERTA PEDIDOS */}
@@ -1537,7 +1578,7 @@ export default function App() {
           <div className="fixed inset-0 bg-black/90 z-50 flex items-center justify-center p-4 animate-in fade-in">
             <div className="bg-zinc-900 border border-zinc-800 p-5 rounded-xl w-full max-w-sm shadow-2xl">
               <h3 className="text-yellow-400 font-bold mb-1 uppercase text-sm">Registrar Pago</h3>
-              <p className="text-xs text-zinc-400 mb-4">Pendiente: <span className="font-bold text-white">${promptModal.maxAmount.toFixed(2)}</span></p>
+              <p className="text-xs text-zinc-400 mb-4">Pendiente: <span className="font-bold text-yellow-400">${Math.round(promptModal.maxAmount).toLocaleString('es-CO')} COP</span></p>
               <input type="number" step="0.01" max={promptModal.maxAmount} value={promptModal.amount} onChange={e=>setPromptModal({...promptModal,amount:parseFloat(e.target.value)||0})} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white font-bold text-lg mb-3 outline-none focus:border-yellow-400 text-center"/>
               <select value={promptModal.method} onChange={e=>setPromptModal({...promptModal,method:e.target.value})} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white font-bold text-sm mb-4 outline-none">
                 {paymentMethods.map(m=><option key={m} value={m}>{m}</option>)}
@@ -1548,8 +1589,8 @@ export default function App() {
                   const {id,type,method,amount,maxAmount}=promptModal;
                   const pay=Math.min(isNaN(amount)||amount<=0?0:amount,maxAmount);
                   if(pay<=0){showToast('Monto inválido');return;}
-                  if(type==='cxc'){const n=sales.map(s=>s.id===id?{...s,paidAmount:(s.paidAmount||0)+pay,isPaid:(s.paidAmount||0)+pay>=s.usd,method}:s);setSales(n);guardarLocal({sales:n});}
-                  else{const n=purchases.map(p=>p.id===id?{...p,paidAmount:(p.paidAmount||0)+pay,isPaid:(p.paidAmount||0)+pay>=p.usd,method}:p);setPurchases(n);guardarLocal({purchases:n});}
+                  if(type==='cxc'){const n=sales.map(s=>s.id===id?{...s,paidAmount:(s.paidAmount||0)+pay,isPaid:(s.paidAmount||0)+pay>=(s.cop||0),method}:s);setSales(n);guardarLocal({sales:n});}
+                  else{const n=purchases.map(p=>p.id===id?{...p,paidAmount:(p.paidAmount||0)+pay,isPaid:(p.paidAmount||0)+pay>=(p.cop||0),method}:p);setPurchases(n);guardarLocal({purchases:n});}
                   setPromptModal({isOpen:false,id:null,type:null,method:'Efectivo COP',amount:0,maxAmount:0});
                   showToast(pay>=maxAmount?'✅ Deuda liquidada':'✅ Abono registrado');
                 }} className="flex-1 bg-yellow-400 text-black p-3 rounded-lg text-xs font-bold hover:bg-yellow-300">CONFIRMAR</button>
