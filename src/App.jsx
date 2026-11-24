@@ -54,6 +54,7 @@ import {
   normalizeClients,
   normalizeProducers,
   saveV8State,
+  scanAndRecoverDirectoryFromDevice,
 } from './utils/storage.js';
 
 const CURRENCIES = ['COP', 'USD', 'BS'];
@@ -89,6 +90,30 @@ export default function App() {
       metaTheme.setAttribute('content', theme === 'dark' ? '#09090b' : '#D97706');
     }
   }, [appState.theme]);
+
+  // Auto-escanear respaldos en Documentos / memoria si aún no hay clientes o productores
+  useEffect(() => {
+    if (appState.clients.length === 0 && appState.producers.length === 0) {
+      scanAndRecoverDirectoryFromDevice(appState)
+        .then((res) => {
+          if (res.addedClients > 0 || res.addedProducers > 0) {
+            setAppState((prev) => {
+              const merged = {
+                ...prev,
+                clients: res.state.clients,
+                producers: res.state.producers,
+              };
+              saveV8State(merged);
+              return merged;
+            });
+            setMigrationBanner(
+              `✅ Recuperados automáticamente ${res.addedClients} clientes y ${res.addedProducers} productores desde ${res.sourcesFound.join(', ')}`
+            );
+          }
+        })
+        .catch(() => {});
+    }
+  }, []);
 
   const showToast = useCallback((msg) => {
     setToast(msg);
@@ -703,6 +728,26 @@ export default function App() {
     }
   };
 
+  const handleRecoverDirectory = async () => {
+    try {
+      const res = await scanAndRecoverDirectoryFromDevice(appState);
+      if (res.addedClients > 0 || res.addedProducers > 0) {
+        updateState((prev) => ({
+          ...prev,
+          clients: res.state.clients,
+          producers: res.state.producers,
+        }));
+        showToast(
+          `✅ Recuperados +${res.addedClients} clientes y +${res.addedProducers} productores`
+        );
+      } else {
+        showToast('No se encontraron más clientes/productores nuevos en Documentos o memoria');
+      }
+    } catch {
+      showToast('Usa IMPORTAR JSON y selecciona tu archivo Colados_Respaldo');
+    }
+  };
+
   const handleImportJson = (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -1022,6 +1067,7 @@ export default function App() {
           onExportV8={handleExportV8}
           onExportLegacy={handleExportLegacy}
           onImportJson={handleImportJson}
+          onRecoverDirectory={handleRecoverDirectory}
         />
 
         <ReceiptModal

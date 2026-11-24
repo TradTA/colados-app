@@ -37,6 +37,7 @@ export default function SettingsModal({
   onExportV8,
   onExportLegacy,
   onImportJson,
+  onRecoverDirectory,
 }) {
   const {
     theme,
@@ -174,6 +175,13 @@ export default function SettingsModal({
               <input type="file" accept=".json" className="hidden" onChange={onImportJson} />
             </label>
           </div>
+          <button
+            type="button"
+            onClick={onRecoverDirectory}
+            className="w-full theme-success-soft py-2.5 px-3 rounded-xl text-[11px] font-black flex items-center justify-center gap-1.5"
+          >
+            <RotateCcw size={14} /> RECUPERAR CLIENTES/PRODUCTORES (MEMORIA / DOCUMENTOS)
+          </button>
           {hasLegacyData && (
             <button
               type="button"

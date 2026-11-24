@@ -68,10 +68,17 @@ test('Migración segura V6 -> V8 conserva solo Clientes y Productores y deja int
       'Finca El Mirador',
       { id: 10, name: 'Carlos Pérez', finca: 'La Esperanza', sector: 'Norte', phone: '311000' },
     ],
-    sales: [{ id: 1, cop: 50000, clientName: 'Café Central' }],
-    purchases: [{ id: 2, kg: 50, coffeeType: 'Pergamino', producer: 'Carlos Pérez' }],
+    sales: [
+      { id: 1, cop: 50000, clientName: 'Café Central' },
+      { id: 5, cop: 25000, clientName: 'Panadería La Espiga' },
+    ],
+    orders: [{ id: 6, clientName: 'Restaurante Los Andes' }],
+    purchases: [
+      { id: 2, kg: 50, coffeeType: 'Pergamino', producer: 'Carlos Pérez' },
+      { id: 7, kg: 20, coffeeType: 'Azul', producer: 'Hacienda Santa Rita' },
+    ],
     expenses: [{ id: 3, cop: 12000 }],
-    processHistory: [{ id: 4, type: 'trilla', input: 10, output: 8 }],
+    processHistory: [{ id: 4, type: 'trilla', producer: 'Finca Las Nubes', input: 10, output: 8 }],
   };
 
   const rawLegacyStr = JSON.stringify(legacyPayload);
@@ -82,13 +89,17 @@ test('Migración segura V6 -> V8 conserva solo Clientes y Productores y deja int
   assert.equal(hasLegacyData, true);
   assert.ok(migrationNotice);
   assert.equal(state.schemaVersion, 8);
-  assert.equal(state.clients.length, 2);
+  assert.equal(state.clients.length, 4);
   assert.equal(state.clients[0].fullName, 'Café Central');
   assert.equal(state.clients[1].fullName, 'Don Pedro');
+  assert.equal(state.clients[2].fullName, 'Panadería La Espiga');
+  assert.equal(state.clients[3].fullName, 'Restaurante Los Andes');
 
-  assert.equal(state.producers.length, 2);
+  assert.equal(state.producers.length, 4);
   assert.equal(state.producers[0].name, 'Finca El Mirador');
   assert.equal(state.producers[1].finca, 'La Esperanza');
+  assert.equal(state.producers[2].name, 'Hacienda Santa Rita');
+  assert.equal(state.producers[3].name, 'Finca Las Nubes');
 
   // Datos contables e inventario arrancan en limpio
   assert.deepEqual(state.inventoryGrams, { pergamino: 0, azul: 0, tostado: 0 });

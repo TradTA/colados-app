@@ -6,6 +6,68 @@ import { DEFAULT_RATES, roundCop } from './money.js';
 
 export const V8_STORAGE_KEY = 'colados_app_v8';
 export const LEGACY_STORAGE_KEY = 'colados_app_v6';
+export const ALL_LEGACY_KEYS = [
+  'colados_app_v6',
+  'colados_app_v7',
+  'colados_app_v5',
+  'colados_app',
+  'colados_data',
+];
+
+export function extractDeepDirectoryFromObject(obj) {
+  if (!obj || typeof obj !== 'object') {
+    return { clients: [], producers: [] };
+  }
+
+  const rawClients = [...(Array.isArray(obj.clients) ? obj.clients : [])];
+  if (Array.isArray(obj.sales)) {
+    for (const s of obj.sales) {
+      const name = String(s?.clientName || '').trim();
+      if (name && name.toLowerCase() !== 'cliente ocasional') {
+        rawClients.push(name);
+      }
+    }
+  }
+  if (Array.isArray(obj.orders)) {
+    for (const o of obj.orders) {
+      const name = String(o?.clientName || '').trim();
+      if (name && name.toLowerCase() !== 'cliente ocasional') {
+        rawClients.push(name);
+      }
+    }
+  }
+
+  const rawProducers = [...(Array.isArray(obj.producers) ? obj.producers : [])];
+  if (Array.isArray(obj.purchases)) {
+    for (const p of obj.purchases) {
+      const name = String(p?.producer || '').trim();
+      if (name && !['n/a', 'stock general / mezcla'].includes(name.toLowerCase())) {
+        rawProducers.push(name);
+      }
+    }
+  }
+  if (Array.isArray(obj.processHistory)) {
+    for (const l of obj.processHistory) {
+      const name = String(l?.producer || '').trim();
+      if (name && !['n/a', 'stock general / mezcla'].includes(name.toLowerCase())) {
+        rawProducers.push(name);
+      }
+    }
+  }
+  if (Array.isArray(obj.activeProcesses)) {
+    for (const ap of obj.activeProcesses) {
+      const name = String(ap?.producer || '').trim();
+      if (name && !['n/a', 'stock general / mezcla'].includes(name.toLowerCase())) {
+        rawProducers.push(name);
+      }
+    }
+  }
+
+  return {
+    clients: normalizeClients(rawClients),
+    producers: normalizeProducers(rawProducers),
+  };
+}
 
 export const DEFAULT_CATALOG = [
   { id: 1, name: '200g Bolsa Especial', priceCop: 15000, grams: 200, packType: 'especial', hasLabel: true },
@@ -251,8 +313,7 @@ export function normalizeV8State(raw) {
  * procesos anteriores se dejan limpios para evitar arrastrar errores previos.
  */
 export function migrateFromLegacyRaw(legacyObj) {
-  const clients = normalizeClients(legacyObj?.clients);
-  const producers = normalizeProducers(legacyObj?.producers);
+  const { clients, producers } = extractDeepDirectoryFromObject(legacyObj);
   const legacyRates = legacyObj?.rates || {};
   const rates = {
     usd_cop: safePositiveNumber(legacyRates.usd_cop, DEFAULT_RATES.usd_cop),
@@ -294,11 +355,15 @@ export function saveV8State(state, storage = getDefaultStorage()) {
 
 export function getLegacyRawString(storage = getDefaultStorage()) {
   if (!storage) return null;
-  try {
-    return storage.getItem(LEGACY_STORAGE_KEY);
-  } catch {
-    return null;
+  for (const key of ALL_LEGACY_KEYS) {
+    try {
+      const val = storage.getItem(key);
+      if (val) return val;
+    } catch {
+      // ignore
+    }
   }
+  return null;
 }
 
 export function loadInitialState(storage = getDefaultStorage()) {
@@ -311,9 +376,33 @@ export function loadInitialState(storage = getDefaultStorage()) {
       if (v8Raw) {
         const parsedV8 = JSON.parse(v8Raw);
         if (parsedV8 && parsedV8.schemaVersion === 8) {
+          let normalized = normalizeV8State(parsedV8);
+          let autoRecoveredNotice = null;
+
+          // Si hay datos legados en localStorage, rescatar clientes/productores faltantes (incluidos los de ventas/compras)
+          if (legacyRaw) {
+            try {
+              const legacyParsed = JSON.parse(legacyRaw);
+              const deep = extractDeepDirectoryFromObject(legacyParsed);
+              const cMerge = mergeDirectoryLists(normalized.clients, deep.clients, 'fullName');
+              const pMerge = mergeDirectoryLists(normalized.producers, deep.producers, 'name');
+              if (cMerge.addedCount > 0 || pMerge.addedCount > 0) {
+                normalized = {
+                  ...normalized,
+                  clients: cMerge.merged,
+                  producers: pMerge.merged,
+                };
+                saveV8State(normalized, storage);
+                autoRecoveredNotice = `Se recuperaron +${cMerge.addedCount} clientes y +${pMerge.addedCount} productores del historial anterior.`;
+              }
+            } catch {
+              // ignore
+            }
+          }
+
           return {
-            state: normalizeV8State(parsedV8),
-            migrationNotice: null,
+            state: normalized,
+            migrationNotice: autoRecoveredNotice,
             hasLegacyData,
           };
         }
@@ -379,8 +468,7 @@ export function importBackupObject(parsed, currentState = createFreshV8State()) 
     };
   }
 
-  const incomingClients = normalizeClients(parsed.clients);
-  const incomingProducers = normalizeProducers(parsed.producers);
+  const { clients: incomingClients, producers: incomingProducers } = extractDeepDirectoryFromObject(parsed);
   const clientMerge = mergeDirectoryLists(currentState.clients || [], incomingClients, 'fullName');
   const producerMerge = mergeDirectoryLists(currentState.producers || [], incomingProducers, 'name');
 
@@ -393,6 +481,80 @@ export function importBackupObject(parsed, currentState = createFreshV8State()) 
     mode: 'legacy_directory_only',
     addedClients: clientMerge.addedCount,
     addedProducers: producerMerge.addedCount,
+  };
+}
+
+export async function scanAndRecoverDirectoryFromDevice(currentState = createFreshV8State(), storage = getDefaultStorage()) {
+  let mergedClients = [...(currentState.clients || [])];
+  let mergedProducers = [...(currentState.producers || [])];
+  let addedClients = 0;
+  let addedProducers = 0;
+  const sourcesFound = [];
+
+  const absorbObject = (obj, label) => {
+    if (!obj || typeof obj !== 'object') return;
+    const { clients, producers } = extractDeepDirectoryFromObject(obj);
+    const cRes = mergeDirectoryLists(mergedClients, clients, 'fullName');
+    const pRes = mergeDirectoryLists(mergedProducers, producers, 'name');
+    mergedClients = cRes.merged;
+    mergedProducers = pRes.merged;
+    addedClients += cRes.addedCount;
+    addedProducers += pRes.addedCount;
+    if (cRes.addedCount > 0 || pRes.addedCount > 0) {
+      sourcesFound.push(label);
+    }
+  };
+
+  if (storage) {
+    for (const key of ALL_LEGACY_KEYS) {
+      try {
+        const raw = storage.getItem(key);
+        if (raw) {
+          absorbObject(JSON.parse(raw), key);
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  try {
+    const { Filesystem, Directory, Encoding } = await import('@capacitor/filesystem');
+    const dirRes = await Filesystem.readdir({
+      path: '',
+      directory: Directory.Documents,
+    });
+    const files = Array.isArray(dirRes?.files) ? dirRes.files : [];
+    for (const f of files) {
+      const name = typeof f === 'string' ? f : f?.name;
+      if (!name || !name.toLowerCase().endsWith('.json')) continue;
+      if (!name.toLowerCase().includes('colados') && !name.toLowerCase().includes('respaldo')) continue;
+      try {
+        const readRes = await Filesystem.readFile({
+          path: name,
+          directory: Directory.Documents,
+          encoding: Encoding.UTF8,
+        });
+        if (readRes?.data) {
+          absorbObject(JSON.parse(readRes.data), name);
+        }
+      } catch {
+        // ignore individual file error
+      }
+    }
+  } catch {
+    // Filesystem no disponible o sin permisos
+  }
+
+  return {
+    state: {
+      ...currentState,
+      clients: mergedClients,
+      producers: mergedProducers,
+    },
+    addedClients,
+    addedProducers,
+    sourcesFound,
   };
 }
 
