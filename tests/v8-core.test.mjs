@@ -341,3 +341,62 @@ test('Motor unificado de costos (2 mermas) y Punto de Equilibrio', () => {
 
   assert.ok(analysis.kilosTotalesEquilibrio > 0);
 });
+
+test('V8.1: Venta de gramos personalizados (300g, 400g) con precio final manual / descuento', () => {
+  const rates = { usd_cop: 4000, cop_bs: 0.01 };
+  const customItems = [
+    normalizeCartItem({
+      name: '300g Empaque Especial',
+      packType: 'especial',
+      hasLabel: true,
+      gramsPerUnit: 300,
+      unitPriceCop: 22000,
+      quantity: 1,
+    }),
+    normalizeCartItem({
+      name: '350g Sin Bolsa / Granel',
+      packType: 'sin_bolsa',
+      hasLabel: false,
+      gramsPerUnit: 350,
+      unitPriceCop: 18000,
+      quantity: 1,
+    }),
+  ];
+
+  // Subtotal = 40.000 COP, gramos = 650g, pero se vende con descuento manual en 35.000 COP
+  const sale = createSaleRecord({
+    id: 301,
+    invoiceCounter: 10,
+    clientName: 'Cliente Descuento',
+    items: customItems,
+    method: 'Efectivo COP',
+    paidNowCop: 35000,
+    customTotalCop: 35000,
+    date: '24/11/2026',
+    isoDate: '2026-11-24',
+    time: '14:00',
+    rates,
+    previousDebtCop: 0,
+  });
+
+  assert.equal(sale.totalGrams, 650);
+  assert.equal(sale.subtotalCop, 40000);
+  assert.equal(sale.discountCop, 5000);
+  assert.equal(sale.cop, 35000);
+  assert.equal(sale.isPaid, true);
+  assert.equal(sale.balanceDueCop, 0);
+
+  // Insumos: 1 bolsa especial + 1 etiqueta, 0 bolsas transparentes (porque el segundo ítem es sin_bolsa)
+  const suppliesAfter = applySaleSuppliesDelta(
+    { bolsas_especiales: 10, bolsas_transparentes: 10, etiquetas: 10, stickers_grandes: 5, stickers_pequenos: 5 },
+    sale.items,
+    -1
+  );
+  assert.equal(suppliesAfter.bolsas_especiales, 9);
+  assert.equal(suppliesAfter.etiquetas, 9);
+  assert.equal(suppliesAfter.bolsas_transparentes, 10);
+
+  const receiptText = buildSaleWhatsAppText(sale, 0, rates);
+  assert.match(receiptText, /Subtotal:/);
+  assert.match(receiptText, /Descuento aplicado:/);
+});

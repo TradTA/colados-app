@@ -6,6 +6,7 @@ import {
   ChevronUp,
   ClipboardList,
   DollarSign,
+  Edit3,
   Minus,
   Package,
   Plus,
@@ -42,6 +43,8 @@ const PAYMENT_METHODS = [
   'Binance',
 ];
 
+const QUICK_GRAM_PRESETS = [100, 200, 250, 300, 350, 400, 500, 1000];
+
 export default function VentasTab({
   state,
   onUpdateRates,
@@ -62,11 +65,15 @@ export default function VentasTab({
   const [cart, setCart] = useState([]);
   const [activeOrder, setActiveOrder] = useState(null);
 
-  // Granel por gramos variables
-  const [showGranelBox, setShowGranelBox] = useState(false);
-  const [granelGrams, setGranelGrams] = useState('250');
+  // Venta personalizada / otros gramos (300g, 400g, etc.) con precio a mano
+  const [granelGrams, setGranelGrams] = useState('300');
   const [granelPackType, setGranelPackType] = useState('transparente');
-  const [granelPriceCop, setGranelPriceCop] = useState('10000');
+  const [granelPriceCop, setGranelPriceCop] = useState('12000');
+  const [granelQty, setGranelQty] = useState('1');
+  const [granelName, setGranelName] = useState('');
+
+  // Precio Total Final manual / con descuento
+  const [manualFinalTotalCop, setManualFinalTotalCop] = useState('');
 
   // Pago y vuelto
   const [paymentMode, setPaymentMode] = useState('contado'); // 'contado' | 'credito' | 'donacion'
@@ -75,9 +82,13 @@ export default function VentasTab({
   const [receivedCurrency, setReceivedCurrency] = useState('COP');
   const [applyExcessToDebt, setApplyExcessToDebt] = useState(true);
 
-  // Pedidos agendados
+  // Pedidos agendados (catálogo o gramos personalizados + precio a mano)
   const [orderDate, setOrderDate] = useState(todayISO);
-  const [orderProductId, setOrderProductId] = useState('');
+  const [orderProductId, setOrderProductId] = useState('custom');
+  const [orderCustomName, setOrderCustomName] = useState('');
+  const [orderGrams, setOrderGrams] = useState('300');
+  const [orderUnitPriceCop, setOrderUnitPriceCop] = useState('12000');
+  const [orderPackType, setOrderPackType] = useState('especial');
   const [orderQty, setOrderQty] = useState(1);
   const [orderRecurring, setOrderRecurring] = useState(false);
 
@@ -87,6 +98,22 @@ export default function VentasTab({
   );
 
   const cartTotals = useMemo(() => computeCartTotals(cart), [cart]);
+
+  // Total efectivo (permite poner un precio final a mano o con descuento)
+  const effectiveOrderTotalCop = useMemo(() => {
+    if (
+      manualFinalTotalCop !== '' &&
+      manualFinalTotalCop !== null &&
+      Number.isFinite(Number(manualFinalTotalCop)) &&
+      Number(manualFinalTotalCop) >= 0
+    ) {
+      return roundCop(manualFinalTotalCop);
+    }
+    return cartTotals.totalCop;
+  }, [manualFinalTotalCop, cartTotals.totalCop]);
+
+  const appliedDiscountCop = Math.max(0, cartTotals.totalCop - effectiveOrderTotalCop);
+
   const previousDebtCop = useMemo(
     () => (vClient.trim() ? getClientDebtCop(sales, vClient) : 0),
     [sales, vClient]
@@ -98,23 +125,23 @@ export default function VentasTab({
     return 40000;
   }, [catalog]);
 
-  // Cálculos de pago, vuelto y deuda acumulada
+  // Cálculos de pago, vuelto y deuda acumulada usando effectiveOrderTotalCop
   const receivedCop = useMemo(() => {
     if (paymentMode === 'credito' || paymentMode === 'donacion') return 0;
-    if (receivedInput === '' || receivedInput === null) return cartTotals.totalCop;
+    if (receivedInput === '' || receivedInput === null) return effectiveOrderTotalCop;
     return toCop(receivedInput, receivedCurrency, rates);
-  }, [paymentMode, receivedInput, receivedCurrency, rates, cartTotals.totalCop]);
+  }, [paymentMode, receivedInput, receivedCurrency, rates, effectiveOrderTotalCop]);
 
   const changeCop = useMemo(() => {
     if (paymentMode !== 'contado') return 0;
-    return Math.max(0, receivedCop - cartTotals.totalCop);
-  }, [paymentMode, receivedCop, cartTotals.totalCop]);
+    return Math.max(0, receivedCop - effectiveOrderTotalCop);
+  }, [paymentMode, receivedCop, effectiveOrderTotalCop]);
 
   const balanceDueThisOrderCop = useMemo(() => {
     if (paymentMode === 'donacion') return 0;
-    if (paymentMode === 'credito') return cartTotals.totalCop;
-    return Math.max(0, cartTotals.totalCop - receivedCop);
-  }, [paymentMode, cartTotals.totalCop, receivedCop]);
+    if (paymentMode === 'credito') return effectiveOrderTotalCop;
+    return Math.max(0, effectiveOrderTotalCop - receivedCop);
+  }, [paymentMode, effectiveOrderTotalCop, receivedCop]);
 
   const excessForOldDebtCop = useMemo(() => {
     if (paymentMode !== 'contado' || !applyExcessToDebt || previousDebtCop <= 0) return 0;
@@ -132,7 +159,11 @@ export default function VentasTab({
   const addCatalogProduct = (product) => {
     setCart((prev) => {
       const idx = prev.findIndex(
-        (item) => item.catalogId === product.id && !item.isCustomGranel
+        (item) =>
+          item.catalogId === product.id &&
+          !item.isCustomGranel &&
+          item.unitPriceCop === product.priceCop &&
+          item.gramsPerUnit === product.grams
       );
       if (idx >= 0) {
         return prev.map((item, i) =>
@@ -155,38 +186,45 @@ export default function VentasTab({
     });
   };
 
-  const handleGranelGramsChange = (val) => {
-    setGranelGrams(val);
-    const g = toGrams(val, 'g');
-    if (g > 0) {
-      const est = Math.round(((baseKgPriceCop / 1000) * g) / 100) * 100;
-      setGranelPriceCop(String(est));
-    }
+  const handleSelectGramPreset = (g) => {
+    setGranelGrams(String(g));
+    const est = Math.round(((baseKgPriceCop / 1000) * g) / 100) * 100;
+    setGranelPriceCop(String(est));
   };
 
   const handleAddGranelItem = () => {
     const grams = toGrams(granelGrams, 'g');
     const price = roundCop(granelPriceCop);
+    const qty = Math.max(1, parseInt(granelQty, 10) || 1);
     if (grams <= 0 || price < 0) {
-      onNotify?.('⚠️ Ingresa gramos válidos para el granel');
+      onNotify?.('⚠️ Ingresa gramos y precio válidos');
       return;
     }
-    const labelType = granelPackType === 'especial' ? 'Bolsa Especial' : 'Granel';
+    const labelType =
+      granelPackType === 'especial'
+        ? 'Bolsa Especial'
+        : granelPackType === 'sin_bolsa'
+          ? 'Sin Bolsa'
+          : 'Granel';
+    const customLabel = granelName.trim() || `${grams}g (${labelType})`;
+
     setCart((prev) => [
       ...prev,
       normalizeCartItem({
         catalogId: null,
-        name: `${grams}g (${labelType})`,
+        name: customLabel,
         packType: granelPackType,
         hasLabel: granelPackType === 'especial',
         gramsPerUnit: grams,
         unitPriceCop: price,
-        quantity: 1,
+        quantity: qty,
         stickerType: granelPackType === 'especial' ? 'grande' : 'ninguno',
         isCustomGranel: true,
       }),
     ]);
-    setShowGranelBox(false);
+    setGranelName('');
+    setGranelQty('1');
+    onNotify?.(`✅ Agregado: ${qty}x ${customLabel} (${formatGrams(grams * qty)})`);
   };
 
   const updateCartItemQty = (lineId, delta) => {
@@ -202,9 +240,9 @@ export default function VentasTab({
     );
   };
 
-  const updateCartItemSticker = (lineId, stickerType) => {
+  const updateCartItemField = (lineId, patch) => {
     setCart((prev) =>
-      prev.map((item) => (item.lineId === lineId ? { ...item, stickerType } : item))
+      prev.map((item) => (item.lineId === lineId ? normalizeCartItem({ ...item, ...patch }) : item))
     );
   };
 
@@ -227,6 +265,10 @@ export default function VentasTab({
       dateISO: vDate || todayISO,
       clientName: vClient.trim(),
       items: cart,
+      customTotalCop:
+        manualFinalTotalCop !== '' && manualFinalTotalCop !== null
+          ? effectiveOrderTotalCop
+          : null,
       method: paymentMode === 'donacion' ? 'Donación' : vMethod,
       isCredit: paymentMode === 'credito',
       isDonation: paymentMode === 'donacion',
@@ -239,31 +281,66 @@ export default function VentasTab({
     setCart([]);
     setVClient('');
     setReceivedInput('');
+    setManualFinalTotalCop('');
     setPaymentMode('contado');
     setActiveOrder(null);
   };
 
+  const handleOrderProductSelect = (val) => {
+    setOrderProductId(val);
+    if (val !== 'custom') {
+      const product = catalog.find((c) => String(c.id) === String(val));
+      if (product) {
+        setOrderGrams(String(product.grams));
+        setOrderUnitPriceCop(String(product.priceCop));
+        setOrderPackType(product.packType);
+        setOrderCustomName(product.name);
+      }
+    } else {
+      setOrderCustomName('');
+    }
+  };
+
   const handleSubmitOrder = (e) => {
     e.preventDefault();
-    const product = catalog.find((c) => String(c.id) === String(orderProductId));
-    if (!vClient.trim() || !product) {
-      onNotify?.('⚠️ Selecciona cliente y presentación');
+    const grams = toGrams(orderGrams, 'g');
+    const price = roundCop(orderUnitPriceCop);
+    if (!vClient.trim() || grams <= 0) {
+      onNotify?.('⚠️ Ingresa cliente y gramos del pedido');
       return;
     }
+
+    const catalogProduct =
+      orderProductId !== 'custom'
+        ? catalog.find((c) => String(c.id) === String(orderProductId))
+        : null;
+
+    const packLabel =
+      orderPackType === 'especial'
+        ? 'Bolsa Especial'
+        : orderPackType === 'sin_bolsa'
+          ? 'Sin Bolsa'
+          : 'Granel';
+
+    const finalProductName =
+      orderCustomName.trim() ||
+      catalogProduct?.name ||
+      `${grams}g (${packLabel})`;
+
     onCreateOrder({
       clientName: vClient.trim(),
-      productId: product.id,
-      product: product.name,
-      gramsPerUnit: product.grams,
-      unitPriceCop: product.priceCop,
-      packType: product.packType,
-      hasLabel: product.hasLabel,
+      productId: catalogProduct?.id ?? null,
+      product: finalProductName,
+      gramsPerUnit: grams,
+      unitPriceCop: price,
+      packType: orderPackType,
+      hasLabel: orderPackType === 'especial',
       quantity: Math.max(1, Math.round(Number(orderQty) || 1)),
       isoDate: orderDate || todayISO,
       isRecurring: orderRecurring,
     });
     setVClient('');
-    setOrderProductId('');
+    setOrderCustomName('');
     setOrderQty(1);
     setOrderRecurring(false);
     setVTab('pedidos');
@@ -271,22 +348,29 @@ export default function VentasTab({
 
   const handleDispatchOrder = (order) => {
     const catalogMatch =
-      catalog.find((c) => c.id === order.productId) ||
-      catalog.find((c) => c.name === order.product);
+      order.productId != null
+        ? catalog.find((c) => c.id === order.productId)
+        : null;
 
+    const packType = order.packType || catalogMatch?.packType || 'especial';
     const item = normalizeCartItem({
       catalogId: catalogMatch?.id ?? order.productId ?? null,
-      name: catalogMatch?.name || order.product,
-      packType: catalogMatch?.packType || order.packType || 'especial',
-      hasLabel: catalogMatch?.hasLabel ?? order.hasLabel ?? true,
-      gramsPerUnit: catalogMatch?.grams || order.gramsPerUnit || 200,
-      unitPriceCop: catalogMatch?.priceCop ?? order.unitPriceCop ?? 15000,
+      name: order.product || catalogMatch?.name || `${order.gramsPerUnit || 200}g`,
+      packType,
+      hasLabel: order.hasLabel ?? (packType === 'especial'),
+      gramsPerUnit: Number(order.gramsPerUnit) || catalogMatch?.grams || 200,
+      unitPriceCop:
+        order.unitPriceCop !== undefined
+          ? Number(order.unitPriceCop)
+          : (catalogMatch?.priceCop ?? 15000),
       quantity: Math.max(1, Math.round(Number(order.quantity) || 1)),
-      stickerType: (catalogMatch?.packType || order.packType) === 'especial' ? 'grande' : 'ninguno',
+      stickerType: packType === 'especial' ? 'grande' : 'ninguno',
+      isCustomGranel: !catalogMatch,
     });
 
     setVClient(order.clientName);
     setCart([item]);
+    setManualFinalTotalCop('');
     setActiveOrder(order);
     setPaymentMode('contado');
     setReceivedInput('');
@@ -409,7 +493,7 @@ export default function VentasTab({
               <div className="p-3 rounded-xl theme-danger-soft border border-red-300/60 space-y-1.5">
                 <div className="flex justify-between items-center text-xs font-extrabold">
                   <span>⚠️ Cuenta Acumulada ({vClient.trim()})</span>
-                  <span>{formatCOP(previousDebtCop + cartTotals.totalCop)}</span>
+                  <span>{formatCOP(previousDebtCop + effectiveOrderTotalCop)}</span>
                 </div>
                 <div className="grid grid-cols-3 gap-2 text-[11px] pt-1 border-t border-red-300/40">
                   <div>
@@ -418,16 +502,16 @@ export default function VentasTab({
                   </div>
                   <div>
                     <span className="block opacity-80">Pedido de Hoy</span>
-                    <span className="font-black">{formatCOP(cartTotals.totalCop)}</span>
+                    <span className="font-black">{formatCOP(effectiveOrderTotalCop)}</span>
                   </div>
                   <div className="text-right">
                     <span className="block opacity-80">Total Acumulado</span>
-                    <span className="font-black">{formatCOP(previousDebtCop + cartTotals.totalCop)}</span>
+                    <span className="font-black">{formatCOP(previousDebtCop + effectiveOrderTotalCop)}</span>
                   </div>
                 </div>
                 <p className="text-[10px] opacity-85">
-                  Ref: {formatUSD(copToUsd(previousDebtCop + cartTotals.totalCop, rates))} ·{' '}
-                  {formatBS(copToBs(previousDebtCop + cartTotals.totalCop, rates))}
+                  Ref: {formatUSD(copToUsd(previousDebtCop + effectiveOrderTotalCop, rates))} ·{' '}
+                  {formatBS(copToBs(previousDebtCop + effectiveOrderTotalCop, rates))}
                 </p>
               </div>
             )}
@@ -486,75 +570,111 @@ export default function VentasTab({
                   </button>
                 );
               })}
-
-              {/* Botón granel variable */}
-              <button
-                type="button"
-                onClick={() => setShowGranelBox((v) => !v)}
-                className="theme-subtle p-3 rounded-xl text-left border-dashed flex flex-col justify-between"
-              >
-                <span className="text-[9px] font-black uppercase theme-accent-text flex items-center gap-1">
-                  <Scale size={12} /> Peso Variable
-                </span>
-                <p className="text-xs font-extrabold mt-1">Granel por Gramos</p>
-                <p className="text-[10px] theme-muted mt-0.5">
-                  {showGranelBox ? 'Cerrar formulario ▲' : '+ Ingresar gramos ▼'}
-                </p>
-              </button>
             </div>
-
-            {/* Formulario rápido de granel */}
-            {showGranelBox && (
-              <div className="theme-card p-3.5 rounded-xl space-y-3 border-2 border-amber-500/40">
-                <p className="text-xs font-extrabold flex items-center gap-1.5">
-                  <Scale size={14} className="theme-accent-text" />
-                  Venta rápida por gramos
-                </p>
-                <div className="grid grid-cols-3 gap-2">
-                  <div>
-                    <label className="text-[10px] font-bold uppercase theme-muted">Gramos (g)</label>
-                    <input
-                      type="number"
-                      min="1"
-                      value={granelGrams}
-                      onChange={(e) => handleGranelGramsChange(e.target.value)}
-                      className="w-full p-2 rounded-lg theme-input text-xs font-black mt-1"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[10px] font-bold uppercase theme-muted">Empaque</label>
-                    <select
-                      value={granelPackType}
-                      onChange={(e) => setGranelPackType(e.target.value)}
-                      className="w-full p-2 rounded-lg theme-input text-xs font-bold mt-1"
-                    >
-                      <option value="transparente">Transparente</option>
-                      <option value="especial">Bolsa Especial</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-[10px] font-bold uppercase theme-muted">Precio COP</label>
-                    <input
-                      type="number"
-                      step="100"
-                      value={granelPriceCop}
-                      onChange={(e) => setGranelPriceCop(e.target.value)}
-                      className="w-full p-2 rounded-lg theme-input text-xs font-black mt-1"
-                    />
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleAddGranelItem}
-                  className="w-full theme-accent-bg py-2.5 rounded-xl text-xs font-black flex items-center justify-center gap-1.5"
-                >
-                  <Plus size={14} /> Agregar {granelGrams || 0}g al Carrito
-                </button>
-              </div>
-            )}
           </div>
 
-          {/* Carrito multi-producto */}
+          {/* SIEMPRE VISIBLE: Venta Personalizada / Otros Gramos (300g, 400g, etc.) y Precio a Mano */}
+          <div className="theme-card p-3.5 rounded-2xl space-y-2.5 border-2 border-amber-500/40">
+            <div className="flex justify-between items-center">
+              <p className="text-xs font-black uppercase tracking-wider flex items-center gap-1.5 theme-accent-text">
+                <Scale size={15} /> Otro Peso (300g, 400g...) y Precio a Mano
+              </p>
+              <span className="text-[10px] font-bold theme-muted">Descuenta gramos exactos</span>
+            </div>
+
+            {/* Chips rápidos de gramos */}
+            <div className="flex flex-wrap gap-1.5">
+              {QUICK_GRAM_PRESETS.map((g) => (
+                <button
+                  key={g}
+                  type="button"
+                  onClick={() => handleSelectGramPreset(g)}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-black border ${
+                    Number(granelGrams) === g
+                      ? 'theme-accent-bg border-transparent'
+                      : 'theme-subtle theme-muted'
+                  }`}
+                >
+                  {g === 1000 ? '1 Kg' : `${g}g`}
+                </button>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-12 gap-2">
+              <div className="col-span-4">
+                <label className="text-[10px] font-bold uppercase theme-muted">Gramos (g)</label>
+                <input
+                  type="number"
+                  min="1"
+                  value={granelGrams}
+                  onChange={(e) => setGranelGrams(e.target.value)}
+                  placeholder="300"
+                  className="w-full p-2 rounded-xl theme-input text-xs font-black mt-1 text-center"
+                />
+              </div>
+              <div className="col-span-5">
+                <label className="text-[10px] font-bold uppercase theme-muted">
+                  Precio a Mano (COP)
+                </label>
+                <input
+                  type="number"
+                  step="100"
+                  value={granelPriceCop}
+                  onChange={(e) => setGranelPriceCop(e.target.value)}
+                  placeholder="12000"
+                  className="w-full p-2 rounded-xl theme-input text-xs font-black mt-1"
+                />
+              </div>
+              <div className="col-span-3">
+                <label className="text-[10px] font-bold uppercase theme-muted">Cant.</label>
+                <input
+                  type="number"
+                  min="1"
+                  value={granelQty}
+                  onChange={(e) => setGranelQty(e.target.value)}
+                  className="w-full p-2 rounded-xl theme-input text-xs font-black mt-1 text-center"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-12 gap-2">
+              <div className="col-span-6">
+                <label className="text-[10px] font-bold uppercase theme-muted">Empaque</label>
+                <select
+                  value={granelPackType}
+                  onChange={(e) => setGranelPackType(e.target.value)}
+                  className="w-full p-2 rounded-xl theme-input text-xs font-bold mt-1"
+                >
+                  <option value="transparente">Bolsa Transparente / Granel</option>
+                  <option value="especial">Bolsa Especial (c/Etiqueta)</option>
+                  <option value="sin_bolsa">Sin Bolsa</option>
+                </select>
+              </div>
+              <div className="col-span-6">
+                <label className="text-[10px] font-bold uppercase theme-muted">
+                  Nota / Nombre (Opcional)
+                </label>
+                <input
+                  type="text"
+                  value={granelName}
+                  onChange={(e) => setGranelName(e.target.value)}
+                  placeholder={`${granelGrams || 300}g Café Tostado`}
+                  className="w-full p-2 rounded-xl theme-input text-xs mt-1"
+                />
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleAddGranelItem}
+              className="w-full theme-accent-bg py-2.5 rounded-xl text-xs font-black flex items-center justify-center gap-1.5 shadow"
+            >
+              <Plus size={15} /> Agregar {granelQty || 1}x ({granelGrams || 0}g) por{' '}
+              {formatCOP((Number(granelPriceCop) || 0) * (parseInt(granelQty, 10) || 1))}
+            </button>
+          </div>
+
+          {/* Carrito multi-producto con gramos y precio unitario editables a mano */}
           <div className="theme-card p-3.5 rounded-2xl space-y-3">
             <div className="flex justify-between items-center">
               <h3 className="text-xs font-black uppercase tracking-wider flex items-center gap-1.5">
@@ -564,7 +684,10 @@ export default function VentasTab({
               {cart.length > 0 && (
                 <button
                   type="button"
-                  onClick={() => setCart([])}
+                  onClick={() => {
+                    setCart([]);
+                    setManualFinalTotalCop('');
+                  }}
                   className="text-[11px] font-bold theme-danger-text"
                 >
                   Vaciar
@@ -574,7 +697,7 @@ export default function VentasTab({
 
             {cart.length === 0 ? (
               <p className="text-xs theme-muted text-center py-4">
-                Toca productos del catálogo para armar el pedido.
+                Toca productos del catálogo o agrega gramos personalizados arriba.
               </p>
             ) : (
               <div className="space-y-2.5">
@@ -587,54 +710,107 @@ export default function VentasTab({
                       <div>
                         <p className="text-xs font-extrabold">{item.name}</p>
                         <p className="text-[10px] theme-muted">
-                          {item.packType === 'especial' ? 'Bolsa Especial (Con Etiqueta)' : 'Transparente / Granel (Sin Etiqueta)'} ·{' '}
-                          {formatGrams(item.totalGrams)}
+                          Total línea: <strong>{formatGrams(item.totalGrams)}</strong> ·{' '}
+                          <strong className="theme-success-text">{formatCOP(item.lineTotalCop)}</strong>
                         </p>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-black theme-success-text">
-                          {formatCOP(item.lineTotalCop)}
+                      <button
+                        type="button"
+                        onClick={() => removeCartItem(item.lineId)}
+                        className="theme-muted hover:text-red-500 p-1"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+
+                    {/* Edición directa de Cantidad, Gramos y Precio a Mano en el carrito */}
+                    <div className="grid grid-cols-12 gap-2 items-end">
+                      <div className="col-span-4">
+                        <span className="text-[9px] font-bold uppercase theme-muted block mb-1">
+                          Cantidad
                         </span>
-                        <button
-                          type="button"
-                          onClick={() => removeCartItem(item.lineId)}
-                          className="theme-muted hover:text-red-500 p-1"
-                        >
-                          <Trash2 size={13} />
-                        </button>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => updateCartItemQty(item.lineId, -1)}
+                            className="theme-card w-7 h-7 rounded-lg flex items-center justify-center font-black"
+                          >
+                            <Minus size={12} />
+                          </button>
+                          <span className="w-6 text-center text-xs font-black">{item.quantity}</span>
+                          <button
+                            type="button"
+                            onClick={() => updateCartItemQty(item.lineId, 1)}
+                            className="theme-card w-7 h-7 rounded-lg flex items-center justify-center font-black"
+                          >
+                            <Plus size={12} />
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="col-span-3">
+                        <label className="text-[9px] font-bold uppercase theme-muted block mb-1">
+                          Gramos/ud
+                        </label>
+                        <input
+                          type="number"
+                          min="1"
+                          value={item.gramsPerUnit}
+                          onChange={(e) =>
+                            updateCartItemField(item.lineId, {
+                              gramsPerUnit: Math.max(1, parseInt(e.target.value, 10) || 1),
+                            })
+                          }
+                          className="w-full p-1.5 rounded-lg theme-card text-xs font-black text-center"
+                        />
+                      </div>
+
+                      <div className="col-span-5">
+                        <label className="text-[9px] font-bold uppercase theme-muted block mb-1">
+                          Precio/ud ($ a mano)
+                        </label>
+                        <input
+                          type="number"
+                          step="100"
+                          value={item.unitPriceCop}
+                          onChange={(e) =>
+                            updateCartItemField(item.lineId, {
+                              unitPriceCop: Math.max(0, parseInt(e.target.value, 10) || 0),
+                            })
+                          }
+                          className="w-full p-1.5 rounded-lg theme-card text-xs font-black"
+                        />
                       </div>
                     </div>
 
-                    <div className="flex justify-between items-center gap-2">
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => updateCartItemQty(item.lineId, -1)}
-                          className="theme-card w-7 h-7 rounded-lg flex items-center justify-center font-black"
-                        >
-                          <Minus size={13} />
-                        </button>
-                        <span className="w-7 text-center text-xs font-black">{item.quantity}</span>
-                        <button
-                          type="button"
-                          onClick={() => updateCartItemQty(item.lineId, 1)}
-                          className="theme-card w-7 h-7 rounded-lg flex items-center justify-center font-black"
-                        >
-                          <Plus size={13} />
-                        </button>
-                      </div>
+                    {/* Selector de Bolsa y Sticker por línea */}
+                    <div className="flex flex-wrap justify-between items-center gap-1.5 pt-1 border-t theme-border">
+                      <select
+                        value={item.packType}
+                        onChange={(e) =>
+                          updateCartItemField(item.lineId, {
+                            packType: e.target.value,
+                            hasLabel: e.target.value === 'especial',
+                          })
+                        }
+                        className="p-1 rounded-lg theme-card text-[10px] font-bold"
+                      >
+                        <option value="especial">Bolsa Especial (c/Etiq.)</option>
+                        <option value="transparente">Transparente / Granel</option>
+                        <option value="sin_bolsa">Sin Bolsa</option>
+                      </select>
 
                       <div className="flex items-center gap-1">
                         {[
                           { key: 'grande', label: 'Sticker G' },
                           { key: 'pequeño', label: 'Sticker P' },
-                          { key: 'ninguno', label: 'Sin' },
+                          { key: 'ninguno', label: 'Sin Sticker' },
                         ].map((st) => (
                           <button
                             key={st.key}
                             type="button"
-                            onClick={() => updateCartItemSticker(item.lineId, st.key)}
-                            className={`px-2 py-1 rounded text-[10px] font-bold border ${
+                            onClick={() => updateCartItemField(item.lineId, { stickerType: st.key })}
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
                               item.stickerType === st.key
                                 ? 'theme-accent-bg border-transparent'
                                 : 'theme-card theme-muted'
@@ -652,7 +828,7 @@ export default function VentasTab({
                   <div className="p-2.5 rounded-xl theme-danger-soft text-[11px] font-bold flex items-center gap-2">
                     <AlertTriangle size={14} />
                     <span>
-                      El carrito ({formatKg(cartTotals.totalGrams)}) supera el stock tostado ({formatKg(inventoryGrams?.tostado || 0)}).
+                      El carrito ({formatKg(cartTotals.totalGrams)}) supera el stock tostado ({formatKg(inventoryGrams?.tostado || 0)}). Puedes cargar tu café tostado actual en la pestaña Proceso.
                     </span>
                   </div>
                 )}
@@ -660,12 +836,50 @@ export default function VentasTab({
             )}
           </div>
 
-          {/* Pago, Vuelto y Saldo */}
+          {/* Pago, Descuento Manual, Vuelto y Saldo */}
           {cart.length > 0 && (
             <form onSubmit={handleSubmitSale} className="theme-card p-3.5 rounded-2xl space-y-3">
               <p className="text-xs font-black uppercase tracking-wider theme-muted">
-                Pago, Vuelto y Saldo
+                Total a Cobrar (Descuento), Pago y Vuelto
               </p>
+
+              {/* Total Final editable a mano para descuentos */}
+              <div className="theme-subtle p-3 rounded-xl space-y-1.5">
+                <div className="flex justify-between items-center text-xs">
+                  <span className="font-bold theme-muted">Suma normal del carrito:</span>
+                  <span className="font-black">{formatCOP(cartTotals.totalCop)}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="flex-1">
+                    <label className="text-[10px] font-bold uppercase theme-accent-text flex items-center gap-1">
+                      <Edit3 size={11} /> Total Final a Cobrar (COP · Pon a mano si hay descuento)
+                    </label>
+                    <input
+                      type="number"
+                      step="100"
+                      value={manualFinalTotalCop}
+                      onChange={(e) => setManualFinalTotalCop(e.target.value)}
+                      placeholder={String(cartTotals.totalCop)}
+                      className="w-full p-2.5 rounded-xl theme-card text-sm font-black mt-1"
+                    />
+                  </div>
+                  {manualFinalTotalCop !== '' && (
+                    <button
+                      type="button"
+                      onClick={() => setManualFinalTotalCop('')}
+                      className="text-[10px] font-bold underline theme-muted mt-5"
+                    >
+                      Restaurar
+                    </button>
+                  )}
+                </div>
+                {appliedDiscountCop > 0 && (
+                  <p className="text-[11px] font-black theme-success-text">
+                    🏷️ Descuento aplicado: -{formatCOP(appliedDiscountCop)} (Cobras{' '}
+                    {formatCOP(effectiveOrderTotalCop)})
+                  </p>
+                )}
+              </div>
 
               <div className="grid grid-cols-3 gap-2">
                 {[
@@ -708,14 +922,14 @@ export default function VentasTab({
                   <div className="space-y-1.5">
                     <div className="flex justify-between items-center">
                       <label className="text-[10px] font-bold uppercase theme-muted">
-                        Monto Pagado / Recibido
+                        Monto Pagado / Recibido del Cliente
                       </label>
                       <div className="flex gap-1">
                         <button
                           type="button"
                           onClick={() => {
                             setReceivedCurrency('COP');
-                            setReceivedInput(String(cartTotals.totalCop));
+                            setReceivedInput(String(effectiveOrderTotalCop));
                           }}
                           className="text-[10px] font-extrabold px-2 py-0.5 rounded theme-accent-soft"
                         >
@@ -751,10 +965,10 @@ export default function VentasTab({
                         onChange={(e) => setReceivedInput(e.target.value)}
                         placeholder={
                           receivedCurrency === 'COP'
-                            ? String(cartTotals.totalCop)
+                            ? String(effectiveOrderTotalCop)
                             : receivedCurrency === 'USD'
-                              ? String(copToUsd(cartTotals.totalCop, rates))
-                              : String(copToBs(cartTotals.totalCop, rates))
+                              ? String(copToUsd(effectiveOrderTotalCop, rates))
+                              : String(copToBs(effectiveOrderTotalCop, rates))
                         }
                         className="col-span-8 p-2.5 rounded-xl theme-input text-sm font-black"
                       />
@@ -800,7 +1014,7 @@ export default function VentasTab({
 
               {paymentMode === 'credito' && (
                 <div className="p-3 rounded-xl theme-danger-soft text-xs font-bold">
-                  Se cargará completo a Por Cobrar: {formatCOP(cartTotals.totalCop)}.
+                  Se cargará completo a Por Cobrar: {formatCOP(effectiveOrderTotalCop)}.
                   {previousDebtCop > 0 && (
                     <span className="block mt-1">
                       Nuevo saldo total del cliente: {formatCOP(totalAccumulatedAfterCop)}
@@ -820,17 +1034,17 @@ export default function VentasTab({
                 className="w-full theme-accent-bg py-3.5 rounded-xl text-sm font-black flex items-center justify-center gap-2 shadow"
               >
                 <Plus size={18} />
-                REGISTRAR VENTA
+                REGISTRAR VENTA ({formatCOP(effectiveOrderTotalCop)})
               </button>
             </form>
           )}
         </>
       ) : (
-        /* SUB-TAB PEDIDOS */
+        /* SUB-TAB PEDIDOS (Permite cualquier peso: 300g, 400g, catálogo y precio a mano) */
         <div className="space-y-4">
           <div className="theme-card p-4 rounded-2xl space-y-3">
             <h3 className="text-xs font-black uppercase tracking-wider flex items-center gap-1.5 theme-accent-text">
-              <ClipboardList size={15} /> Agendar Nuevo Pedido
+              <ClipboardList size={15} /> Agendar Nuevo Pedido (Catálogo o Gramos Libres)
             </h3>
             <form onSubmit={handleSubmitOrder} className="space-y-3">
               <div className="grid grid-cols-2 gap-2.5">
@@ -850,8 +1064,8 @@ export default function VentasTab({
                     list="clients-list-orders-v8"
                     value={vClient}
                     onChange={(e) => setVClient(e.target.value)}
-                    placeholder="Buscar cliente..."
-                    className="w-full p-2.5 rounded-xl theme-input mt-1 text-xs"
+                    placeholder="Buscar o escribir cliente..."
+                    className="w-full p-2.5 rounded-xl theme-input mt-1 text-xs font-semibold"
                     required
                   />
                   <datalist id="clients-list-orders-v8">
@@ -863,25 +1077,51 @@ export default function VentasTab({
                 </div>
               </div>
 
-              <div className="grid grid-cols-12 gap-2.5">
-                <div className="col-span-8">
-                  <label className="text-[10px] font-bold uppercase theme-muted">Presentación</label>
-                  <select
-                    value={orderProductId}
-                    onChange={(e) => setOrderProductId(e.target.value)}
-                    className="w-full p-2.5 rounded-xl theme-input mt-1 text-xs font-bold"
+              <div>
+                <label className="text-[10px] font-bold uppercase theme-muted">
+                  Base de Presentación (o elige Otro Peso Personalizado)
+                </label>
+                <select
+                  value={orderProductId}
+                  onChange={(e) => handleOrderProductSelect(e.target.value)}
+                  className="w-full p-2.5 rounded-xl theme-input mt-1 text-xs font-bold"
+                >
+                  <option value="custom">⚖️ Otro peso personalizado (300g, 400g, precio libre...)</option>
+                  {catalog.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} ({c.grams}g — {formatCOP(c.priceCop)})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label className="text-[10px] font-bold uppercase theme-muted">Gramos/ud (g)</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={orderGrams}
+                    onChange={(e) => setOrderGrams(e.target.value)}
+                    className="w-full p-2.5 rounded-xl theme-input mt-1 text-xs font-black text-center"
                     required
-                  >
-                    <option value="">Selecciona producto...</option>
-                    {catalog.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name} ({c.grams}g)
-                      </option>
-                    ))}
-                  </select>
+                  />
                 </div>
-                <div className="col-span-4">
-                  <label className="text-[10px] font-bold uppercase theme-muted">Cant.</label>
+                <div>
+                  <label className="text-[10px] font-bold uppercase theme-muted">
+                    Precio/ud ($ a mano)
+                  </label>
+                  <input
+                    type="number"
+                    step="100"
+                    value={orderUnitPriceCop}
+                    onChange={(e) => setOrderUnitPriceCop(e.target.value)}
+                    className="w-full p-2.5 rounded-xl theme-input mt-1 text-xs font-black"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-bold uppercase theme-muted">Cantidad</label>
                   <input
                     type="number"
                     min="1"
@@ -889,6 +1129,33 @@ export default function VentasTab({
                     onChange={(e) => setOrderQty(parseInt(e.target.value, 10) || 1)}
                     className="w-full p-2.5 rounded-xl theme-input mt-1 text-xs font-black text-center"
                     required
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-[10px] font-bold uppercase theme-muted">Empaque</label>
+                  <select
+                    value={orderPackType}
+                    onChange={(e) => setOrderPackType(e.target.value)}
+                    className="w-full p-2.5 rounded-xl theme-input mt-1 text-xs font-bold"
+                  >
+                    <option value="especial">Bolsa Especial (c/Etiqueta)</option>
+                    <option value="transparente">Transparente / Granel</option>
+                    <option value="sin_bolsa">Sin Bolsa</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-bold uppercase theme-muted">
+                    Descripción (Opcional)
+                  </label>
+                  <input
+                    type="text"
+                    value={orderCustomName}
+                    onChange={(e) => setOrderCustomName(e.target.value)}
+                    placeholder={`${orderGrams || 300}g Café`}
+                    className="w-full p-2.5 rounded-xl theme-input mt-1 text-xs"
                   />
                 </div>
               </div>
@@ -906,7 +1173,8 @@ export default function VentasTab({
                 type="submit"
                 className="w-full theme-accent-bg py-3 rounded-xl text-xs font-black flex items-center justify-center gap-1.5"
               >
-                <Save size={15} /> GUARDAR PEDIDO
+                <Save size={15} /> GUARDAR PEDIDO ({formatGrams((Number(orderGrams) || 0) * (Number(orderQty) || 1))} ·{' '}
+                {formatCOP((Number(orderUnitPriceCop) || 0) * (Number(orderQty) || 1))})
               </button>
             </form>
           </div>
@@ -954,9 +1222,16 @@ export default function VentasTab({
                     </button>
                   </div>
                   <div className="flex justify-between items-center pt-2 border-t theme-border">
-                    <p className="text-xs font-black">
-                      {o.quantity}x {o.product}
-                    </p>
+                    <div>
+                      <p className="text-xs font-black">
+                        {o.quantity}x {o.product} ({formatGrams((o.gramsPerUnit || 200) * (o.quantity || 1))})
+                      </p>
+                      {o.unitPriceCop !== undefined && (
+                        <p className="text-[11px] font-bold theme-success-text">
+                          {formatCOP(o.unitPriceCop * (o.quantity || 1))}
+                        </p>
+                      )}
+                    </div>
                     <button
                       type="button"
                       onClick={() => handleDispatchOrder(o)}
@@ -986,7 +1261,7 @@ export default function VentasTab({
                   <ChevronUp size={16} className="theme-accent-text shrink-0" />
                   <div className="truncate">
                     <span className="text-xs font-black">
-                      {formatCOP(cartTotals.totalCop)}
+                      {formatCOP(effectiveOrderTotalCop)}
                     </span>
                     <span className="text-[10px] theme-muted ml-2">
                       {cartTotals.totalUnits} uds · {formatKg(cartTotals.totalGrams)}
@@ -1026,19 +1301,19 @@ export default function VentasTab({
                   <div className="theme-subtle p-1.5 rounded-xl">
                     <span className="text-[9px] font-bold uppercase theme-muted block">COP</span>
                     <span className="text-xs font-black theme-success-text">
-                      {formatCOP(cartTotals.totalCop)}
+                      {formatCOP(effectiveOrderTotalCop)}
                     </span>
                   </div>
                   <div className="theme-subtle p-1.5 rounded-xl">
                     <span className="text-[9px] font-bold uppercase theme-muted block">USD</span>
                     <span className="text-xs font-black">
-                      {formatUSD(copToUsd(cartTotals.totalCop, rates))}
+                      {formatUSD(copToUsd(effectiveOrderTotalCop, rates))}
                     </span>
                   </div>
                   <div className="theme-subtle p-1.5 rounded-xl">
                     <span className="text-[9px] font-bold uppercase theme-muted block">BS</span>
                     <span className="text-xs font-black">
-                      {formatBS(copToBs(cartTotals.totalCop, rates))}
+                      {formatBS(copToBs(effectiveOrderTotalCop, rates))}
                     </span>
                   </div>
                 </div>

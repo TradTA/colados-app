@@ -6,6 +6,7 @@ import { DEFAULT_RATES, roundCop } from './money.js';
 
 export const V8_STORAGE_KEY = 'colados_app_v8';
 export const LEGACY_STORAGE_KEY = 'colados_app_v6';
+export const AUTO_BACKUP_FILENAME = 'Colados_AutoRespaldo_V8.json';
 export const ALL_LEGACY_KEYS = [
   'colados_app_v6',
   'colados_app_v7',
@@ -342,10 +343,67 @@ function getDefaultStorage() {
   return null;
 }
 
+export function hasMeaningfulData(state) {
+  if (!state || typeof state !== 'object') return false;
+  return (
+    (Array.isArray(state.clients) && state.clients.length > 0) ||
+    (Array.isArray(state.producers) && state.producers.length > 0) ||
+    (Array.isArray(state.sales) && state.sales.length > 0) ||
+    (Array.isArray(state.purchases) && state.purchases.length > 0) ||
+    (Array.isArray(state.expenses) && state.expenses.length > 0) ||
+    (Array.isArray(state.processHistory) && state.processHistory.length > 0) ||
+    (state.inventoryGrams?.pergamino || 0) > 0 ||
+    (state.inventoryGrams?.azul || 0) > 0 ||
+    (state.inventoryGrams?.tostado || 0) > 0 ||
+    (state.supplies?.bolsas_especiales || 0) > 0 ||
+    (state.supplies?.bolsas_transparentes || 0) > 0 ||
+    (state.supplies?.etiquetas || 0) > 0 ||
+    (state.supplies?.stickers_grandes || 0) > 0 ||
+    (state.supplies?.stickers_pequenos || 0) > 0
+  );
+}
+
+export async function saveAutoBackupToDocuments(state) {
+  if (!hasMeaningfulData(state)) return false;
+  try {
+    const { Filesystem, Directory, Encoding } = await import('@capacitor/filesystem');
+    await Filesystem.writeFile({
+      path: AUTO_BACKUP_FILENAME,
+      data: JSON.stringify(state),
+      directory: Directory.Documents,
+      encoding: Encoding.UTF8,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function restoreAutoBackupFromDocuments() {
+  try {
+    const { Filesystem, Directory, Encoding } = await import('@capacitor/filesystem');
+    const readRes = await Filesystem.readFile({
+      path: AUTO_BACKUP_FILENAME,
+      directory: Directory.Documents,
+      encoding: Encoding.UTF8,
+    });
+    if (readRes?.data) {
+      const parsed = JSON.parse(readRes.data);
+      if (parsed && parsed.schemaVersion === 8 && hasMeaningfulData(parsed)) {
+        return normalizeV8State(parsed);
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
 export function saveV8State(state, storage = getDefaultStorage()) {
   if (!storage) return false;
   try {
     storage.setItem(V8_STORAGE_KEY, JSON.stringify(state));
+    saveAutoBackupToDocuments(state).catch(() => {});
     return true;
   } catch (err) {
     console.error('Error guardando colados_app_v8:', err);

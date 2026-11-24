@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { List, MinusCircle, Package, ShoppingCart, Trash2 } from 'lucide-react';
+import { Edit3, List, MinusCircle, Package, ShoppingCart, Trash2 } from 'lucide-react';
 import { formatGrams, formatWeightDual, toGrams } from '../utils/grams.js';
 import {
   copToBs,
@@ -30,6 +30,23 @@ const DEFAULT_FIXED_CATEGORIES = new Set([
   'Otros',
 ]);
 
+const SUPPLY_OPTIONS = [
+  { key: '', label: 'No suma unidades (solo gasto en $)' },
+  { key: 'bolsas_especiales', label: 'Bolsas Especiales (Con Etiqueta)' },
+  { key: 'bolsas_transparentes', label: 'Bolsas Transparentes / Granel' },
+  { key: 'etiquetas', label: 'Etiquetas' },
+  { key: 'stickers_grandes', label: 'Stickers Grandes (G)' },
+  { key: 'stickers_pequenos', label: 'Stickers Pequeños (P)' },
+];
+
+const SUPPLY_LABELS = {
+  bolsas_especiales: 'Bolsas Especiales',
+  bolsas_transparentes: 'Bolsas Transp./Granel',
+  etiquetas: 'Etiquetas',
+  stickers_grandes: 'Stickers G',
+  stickers_pequenos: 'Stickers P',
+};
+
 const PAYMENT_METHODS = [
   'Efectivo COP',
   'Efectivo USD',
@@ -45,9 +62,10 @@ export default function ComprasTab({
   onDeletePurchase,
   onAddExpense,
   onDeleteExpense,
+  onUpdateSupplies,
   onNotify,
 }) {
-  const { rates, producers, purchases, expenses, inventoryGrams } = state;
+  const { rates, producers, purchases, expenses, inventoryGrams, supplies } = state;
   const todayISO = getTodayISO();
 
   const [cTab, setCTab] = useState('materia_prima');
@@ -60,7 +78,7 @@ export default function ComprasTab({
   const [cMethod, setCMethod] = useState('Efectivo COP');
   const [showBuyHistory, setShowBuyHistory] = useState(false);
 
-  // OPEX
+  // OPEX + Compra de Insumos (Bolsas, Etiquetas, Stickers)
   const [oDate, setODate] = useState(todayISO);
   const [oCategory, setOCategory] = useState('Empaques/Bolsas');
   const [oIsFixed, setOIsFixed] = useState(false);
@@ -68,7 +86,10 @@ export default function ComprasTab({
   const [oAmount, setOAmount] = useState('');
   const [oCurrency, setOCurrency] = useState('COP');
   const [oMethod, setOMethod] = useState('Efectivo COP');
+  const [oSupplyKey, setOSupplyKey] = useState('bolsas_especiales');
+  const [oSupplyQty, setOSupplyQty] = useState('');
   const [showOpexHistory, setShowOpexHistory] = useState(false);
+  const [showQuickSuppliesEdit, setShowQuickSuppliesEdit] = useState(false);
 
   const sortedProducers = useMemo(
     () => producers.slice().sort((a, b) => a.name.localeCompare(b.name)),
@@ -114,6 +135,24 @@ export default function ComprasTab({
     [oAmount, oCurrency, rates]
   );
 
+  const parsedSupplyQty = Math.max(0, parseInt(oSupplyQty, 10) || 0);
+  const currentSupplyCount = oSupplyKey ? (supplies?.[oSupplyKey] ?? 0) : 0;
+
+  const handleCategoryChange = (cat) => {
+    setOCategory(cat);
+    setOIsFixed(DEFAULT_FIXED_CATEGORIES.has(cat));
+    if (cat === 'Empaques/Bolsas') {
+      setOSupplyKey('bolsas_especiales');
+    } else if (cat === 'Etiquetas') {
+      setOSupplyKey('etiquetas');
+    } else if (cat === 'Insumos') {
+      setOSupplyKey('stickers_grandes');
+    } else {
+      setOSupplyKey('');
+      setOSupplyQty('');
+    }
+  };
+
   const handleOpexSubmit = (e) => {
     e.preventDefault();
     if (!oDesc.trim() || opexCopPreview <= 0) {
@@ -130,10 +169,13 @@ export default function ComprasTab({
       originalCurrency: oCurrency,
       cop: opexCopPreview,
       method: oMethod,
+      supplyKey: oSupplyKey || null,
+      supplyQty: oSupplyKey ? parsedSupplyQty : 0,
     });
 
     setOAmount('');
     setODesc('');
+    setOSupplyQty('');
   };
 
   return (
@@ -155,8 +197,58 @@ export default function ComprasTab({
             cTab === 'opex' ? 'bg-red-600 text-white shadow-sm' : 'theme-muted'
           }`}
         >
-          <MinusCircle size={14} /> GASTOS (OPEX)
+          <MinusCircle size={14} /> INSUMOS & GASTOS
         </button>
+      </div>
+
+      {/* Barra rápida de stock de insumos (Bolsas, Etiquetas, Stickers) editable a mano */}
+      <div className="theme-card p-3 rounded-2xl space-y-2">
+        <div className="flex justify-between items-center">
+          <span className="text-[10px] font-black uppercase tracking-wider theme-accent-text flex items-center gap-1">
+            <Package size={13} /> Stock de Bolsas, Etiquetas y Stickers
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowQuickSuppliesEdit((v) => !v)}
+            className="text-[10px] font-black theme-accent-soft px-2 py-0.5 rounded-lg flex items-center gap-1"
+          >
+            <Edit3 size={11} /> {showQuickSuppliesEdit ? 'Listo' : 'Poner a mano'}
+          </button>
+        </div>
+
+        <div className="grid grid-cols-5 gap-1.5 text-center">
+          {[
+            { key: 'bolsas_especiales', short: 'B. Esp.' },
+            { key: 'bolsas_transparentes', short: 'B. Transp.' },
+            { key: 'etiquetas', short: 'Etiquetas' },
+            { key: 'stickers_grandes', short: 'Sticker G' },
+            { key: 'stickers_pequenos', short: 'Sticker P' },
+          ].map((item) => (
+            <div key={item.key} className="theme-subtle p-1.5 rounded-xl">
+              <span className="text-[8px] font-bold uppercase theme-muted block truncate">
+                {item.short}
+              </span>
+              {showQuickSuppliesEdit ? (
+                <input
+                  type="number"
+                  min="0"
+                  value={supplies?.[item.key] ?? 0}
+                  onChange={(e) =>
+                    onUpdateSupplies?.({
+                      ...supplies,
+                      [item.key]: Math.max(0, parseInt(e.target.value, 10) || 0),
+                    })
+                  }
+                  className="w-full p-1 rounded theme-card text-center font-black text-xs mt-0.5"
+                />
+              ) : (
+                <span className="text-xs font-black block mt-0.5">
+                  {supplies?.[item.key] ?? 0}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
       </div>
 
       {cTab === 'materia_prima' ? (
@@ -351,7 +443,7 @@ export default function ComprasTab({
           )}
         </>
       ) : (
-        /* GASTOS OPEX */
+        /* GASTOS OPEX + COMPRA DE INSUMOS (BOLSAS / ETIQUETAS / STICKERS) */
         <>
           <div className="theme-card p-4 rounded-2xl">
             <form onSubmit={handleOpexSubmit} className="space-y-3.5">
@@ -370,11 +462,7 @@ export default function ComprasTab({
                   <label className="text-[10px] font-bold uppercase theme-muted">Categoría</label>
                   <select
                     value={oCategory}
-                    onChange={(e) => {
-                      const cat = e.target.value;
-                      setOCategory(cat);
-                      setOIsFixed(DEFAULT_FIXED_CATEGORIES.has(cat));
-                    }}
+                    onChange={(e) => handleCategoryChange(e.target.value)}
                     className="w-full p-2.5 rounded-xl theme-input mt-1 text-xs font-bold"
                   >
                     {EXPENSE_CATEGORIES.map((c) => (
@@ -384,6 +472,61 @@ export default function ComprasTab({
                     ))}
                   </select>
                 </div>
+              </div>
+
+              {/* Bloque para sumar unidades compradas (Bolsas, Etiquetas, Stickers) al stock */}
+              <div className="theme-subtle p-3 rounded-xl space-y-2.5 border border-amber-500/30">
+                <p className="text-[10px] font-black uppercase theme-accent-text flex items-center gap-1">
+                  <Package size={13} /> ¿Compraste Bolsas, Etiquetas o Stickers? (Suma al stock)
+                </p>
+                <div className="grid grid-cols-12 gap-2">
+                  <div className="col-span-7">
+                    <label className="text-[9px] font-bold uppercase theme-muted">
+                      Insumo a sumar
+                    </label>
+                    <select
+                      value={oSupplyKey}
+                      onChange={(e) => setOSupplyKey(e.target.value)}
+                      className="w-full p-2 rounded-lg theme-card text-xs font-bold mt-0.5"
+                    >
+                      {SUPPLY_OPTIONS.map((opt) => (
+                        <option key={opt.key} value={opt.key}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="col-span-5">
+                    <label className="text-[9px] font-bold uppercase theme-muted">
+                      Cantidad (uds)
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      disabled={!oSupplyKey}
+                      value={oSupplyQty}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setOSupplyQty(val);
+                        if (oSupplyKey && val && !oDesc) {
+                          setODesc(`${val} ${SUPPLY_LABELS[oSupplyKey]}`);
+                        }
+                      }}
+                      placeholder={oSupplyKey ? 'Ej. 100' : '-'}
+                      className="w-full p-2 rounded-lg theme-card text-xs font-black text-center mt-0.5"
+                    />
+                  </div>
+                </div>
+                {oSupplyKey && (
+                  <div className="flex justify-between items-center text-[11px] pt-1 border-t theme-border">
+                    <span className="theme-muted">
+                      Hay: <strong>{currentSupplyCount} uds</strong>
+                    </span>
+                    <span className="theme-success-text font-black">
+                      Quedarán: {currentSupplyCount + parsedSupplyQty} uds
+                    </span>
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-2">
@@ -413,7 +556,7 @@ export default function ComprasTab({
                   type="text"
                   value={oDesc}
                   onChange={(e) => setODesc(e.target.value)}
-                  placeholder="Ej. 100 Bolsas Especiales, Flete, Gas..."
+                  placeholder="Ej. 100 Bolsas Especiales, 200 Stickers G, Gas..."
                   className="w-full p-2.5 rounded-xl theme-input mt-1 text-xs font-semibold"
                   required
                 />
@@ -433,7 +576,7 @@ export default function ComprasTab({
                   </select>
                 </div>
                 <div>
-                  <label className="text-[10px] font-bold uppercase theme-muted">Monto</label>
+                  <label className="text-[10px] font-bold uppercase theme-muted">Monto Total</label>
                   <input
                     type="number"
                     step="0.01"
@@ -449,6 +592,11 @@ export default function ComprasTab({
               {opexCopPreview > 0 && (
                 <p className="text-[11px] font-bold theme-muted text-center">
                   Equivalente: {formatCOP(opexCopPreview)} · {formatUSD(copToUsd(opexCopPreview, rates))}
+                  {oSupplyKey && parsedSupplyQty > 0 && (
+                    <span className="block theme-accent-text">
+                      Costo unitario: {formatCOP(Math.round(opexCopPreview / parsedSupplyQty))} c/u
+                    </span>
+                  )}
                 </p>
               )}
 
@@ -472,6 +620,7 @@ export default function ComprasTab({
                 className="w-full bg-red-600 hover:bg-red-500 text-white py-3.5 rounded-xl text-xs font-black flex items-center justify-center gap-2 shadow"
               >
                 <MinusCircle size={16} /> REGISTRAR GASTO
+                {oSupplyKey && parsedSupplyQty > 0 ? ` (+${parsedSupplyQty} UDS AL STOCK)` : ''}
               </button>
             </form>
           </div>
@@ -484,7 +633,7 @@ export default function ComprasTab({
                 className="w-full theme-card px-3.5 py-2.5 rounded-xl text-xs font-bold flex justify-between items-center"
               >
                 <span className="flex items-center gap-1.5">
-                  <List size={14} /> HISTORIAL GASTOS ({expenses.length})
+                  <List size={14} /> HISTORIAL GASTOS E INSUMOS ({expenses.length})
                 </span>
                 <span>{showOpexHistory ? '▲' : '▼'}</span>
               </button>
@@ -503,6 +652,11 @@ export default function ComprasTab({
                           {e.date} · {e.isFixed ? 'Fijo/Indirecto' : 'Directo/Variable'} · {e.originalAmount}{' '}
                           {e.originalCurrency}
                         </p>
+                        {e.supplyKey && e.supplyQty > 0 && (
+                          <p className="text-[10px] font-black theme-success-text">
+                            +{e.supplyQty} uds sumadas a {SUPPLY_LABELS[e.supplyKey] || e.supplyKey}
+                          </p>
+                        )}
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
                         <span className="text-xs font-black theme-danger-text">

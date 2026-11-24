@@ -42,6 +42,12 @@ export function buildSaleWhatsAppText(sale, currentClientDebtCop = 0, rates) {
     '*Detalle del pedido:*',
     itemLines,
     `*Peso total:* ${formatWeightDual(sale.totalGrams || 0)}`,
+    ...(roundCop(sale.discountCop) > 0
+      ? [
+          `*Subtotal:* ${formatCOP(sale.subtotalCop)}`,
+          `*Descuento aplicado:* -${formatCOP(sale.discountCop)}`,
+        ]
+      : []),
     `*Pedido de hoy:* ${formatCOP(subtotal)}`,
   ];
 

@@ -49,10 +49,12 @@ import {
   buildCsvContent,
   exportTextFileNativeOrWeb,
   getLegacyRawString,
+  hasMeaningfulData,
   importBackupObject,
   loadInitialState,
   normalizeClients,
   normalizeProducers,
+  restoreAutoBackupFromDocuments,
   saveV8State,
   scanAndRecoverDirectoryFromDevice,
 } from './utils/storage.js';
@@ -91,9 +93,38 @@ export default function App() {
     }
   }, [appState.theme]);
 
-  // Auto-escanear respaldos en Documentos / memoria si aún no hay clientes o productores
+  // Auto-restaurar respaldo de Documentos si la app se reinstaló en limpio, o escanear clientes/productores
   useEffect(() => {
-    if (appState.clients.length === 0 && appState.producers.length === 0) {
+    if (!hasMeaningfulData(appState)) {
+      restoreAutoBackupFromDocuments()
+        .then((autoState) => {
+          if (autoState && hasMeaningfulData(autoState)) {
+            setAppState(autoState);
+            saveV8State(autoState);
+            setMigrationBanner(
+              '✅ Auto-respaldo restaurado automáticamente desde Documentos (Colados_AutoRespaldo_V8.json)'
+            );
+            return;
+          }
+          return scanAndRecoverDirectoryFromDevice(appState).then((res) => {
+            if (res.addedClients > 0 || res.addedProducers > 0) {
+              setAppState((prev) => {
+                const merged = {
+                  ...prev,
+                  clients: res.state.clients,
+                  producers: res.state.producers,
+                };
+                saveV8State(merged);
+                return merged;
+              });
+              setMigrationBanner(
+                `✅ Recuperados automáticamente ${res.addedClients} clientes y ${res.addedProducers} productores desde ${res.sourcesFound.join(', ')}`
+              );
+            }
+          });
+        })
+        .catch(() => {});
+    } else if (appState.clients.length === 0 && appState.producers.length === 0) {
       scanAndRecoverDirectoryFromDevice(appState)
         .then((res) => {
           if (res.addedClients > 0 || res.addedProducers > 0) {
@@ -176,6 +207,7 @@ export default function App() {
     paidNowCop,
     excessToDebtCop,
     previousDebtCop,
+    customTotalCop,
     activeOrder,
   }) => {
     const iso = dateISO || getTodayISO();
@@ -198,6 +230,7 @@ export default function App() {
         time: timeStr,
         rates: prev.rates,
         previousDebtCop,
+        customTotalCop,
       });
 
       let nextSales = [sale, ...prev.sales];
@@ -383,7 +416,19 @@ export default function App() {
     showToast('Compra eliminada e inventario revertido');
   };
 
-  const handleAddExpense = ({ isoDate, category, isFixed, description, originalAmount, originalCurrency, cop, method }) => {
+  const handleAddExpense = ({
+    isoDate,
+    category,
+    isFixed,
+    description,
+    originalAmount,
+    originalCurrency,
+    cop,
+    method,
+    supplyKey = '',
+    supplyQty = 0,
+  }) => {
+    const parsedQty = Math.max(0, parseInt(supplyQty, 10) || 0);
     updateState((prev) => {
       const newExp = {
         id: Date.now(),
@@ -398,18 +443,65 @@ export default function App() {
         method,
         date: formatDateDisplay(isoDate),
         isoDate,
+        supplyKey: supplyKey || '',
+        supplyQty: supplyKey ? parsedQty : 0,
       };
-      return { ...prev, expenses: [newExp, ...prev.expenses] };
+      const nextSupplies = { ...prev.supplies };
+      if (supplyKey && parsedQty > 0 && supplyKey in nextSupplies) {
+        nextSupplies[supplyKey] = Math.max(0, (Number(nextSupplies[supplyKey]) || 0) + parsedQty);
+      }
+      return {
+        ...prev,
+        expenses: [newExp, ...prev.expenses],
+        supplies: nextSupplies,
+      };
     });
-    showToast('✅ Gasto operativo registrado');
+    showToast(
+      supplyKey && parsedQty > 0
+        ? `✅ Gasto registrado y +${parsedQty} uds sumadas al stock de insumos`
+        : '✅ Gasto operativo registrado'
+    );
   };
 
   const handleDeleteExpense = (id) => {
-    updateState((prev) => ({
-      ...prev,
-      expenses: prev.expenses.filter((e) => e.id !== id),
-    }));
+    updateState((prev) => {
+      const target = prev.expenses.find((e) => e.id === id);
+      if (!target) return prev;
+      const nextSupplies = { ...prev.supplies };
+      if (target.supplyKey && target.supplyQty > 0 && target.supplyKey in nextSupplies) {
+        nextSupplies[target.supplyKey] = Math.max(
+          0,
+          (Number(nextSupplies[target.supplyKey]) || 0) - Number(target.supplyQty)
+        );
+      }
+      return {
+        ...prev,
+        expenses: prev.expenses.filter((e) => e.id !== id),
+        supplies: nextSupplies,
+      };
+    });
     showToast('Gasto eliminado');
+  };
+
+  const handleAdjustManualInventory = ({ coffeeKey, grams, mode }) => {
+    const cleanGrams = Math.max(0, Math.round(Number(grams) || 0));
+    updateState((prev) => {
+      const current = Number(prev.inventoryGrams?.[coffeeKey]) || 0;
+      const nextVal = mode === 'add' ? current + cleanGrams : cleanGrams;
+      const delta = nextVal - current;
+      const currentOpening = Number(prev.openingInventoryGrams?.[coffeeKey]) || 0;
+      return {
+        ...prev,
+        inventoryGrams: {
+          ...prev.inventoryGrams,
+          [coffeeKey]: nextVal,
+        },
+        openingInventoryGrams: {
+          ...prev.openingInventoryGrams,
+          [coffeeKey]: Math.max(0, currentOpening + delta),
+        },
+      };
+    });
   };
 
   // ============================================================
@@ -748,6 +840,57 @@ export default function App() {
     }
   };
 
+  const handleRestoreAutoBackup = async () => {
+    try {
+      const restored = await restoreAutoBackupFromDocuments();
+      if (restored && hasMeaningfulData(restored)) {
+        updateState(restored);
+        showToast('✅ Auto-respaldo restaurado desde Documentos');
+      } else {
+        showToast('No se encontró Colados_AutoRespaldo_V8.json en Documentos');
+      }
+    } catch {
+      showToast('Error leyendo auto-respaldo de Documentos');
+    }
+  };
+
+  const handleCopyTextBackup = async () => {
+    try {
+      const raw = JSON.stringify(appState);
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(raw);
+        showToast('📋 Respaldo copiado al portapapeles (pégalo en Notas o WhatsApp)');
+      } else {
+        showToast('Usa Exportar V8 para guardar el archivo');
+      }
+    } catch {
+      showToast('No se pudo copiar al portapapeles');
+    }
+  };
+
+  const handleImportTextBackup = (rawText) => {
+    if (!rawText || !rawText.trim()) {
+      showToast('⚠️ Pega primero el texto del respaldo');
+      return false;
+    }
+    try {
+      const parsed = JSON.parse(rawText.trim());
+      const res = importBackupObject(parsed, appState);
+      updateState(res.state);
+      if (res.mode === 'v8_full') {
+        showToast('✅ Respaldo completo restaurado desde texto');
+      } else {
+        showToast(
+          `✅ Directorio importado: +${res.addedClients} clientes, +${res.addedProducers} productores`
+        );
+      }
+      return true;
+    } catch {
+      showToast('⚠️ El texto pegado no es un JSON válido');
+      return false;
+    }
+  };
+
   const handleImportJson = (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -798,7 +941,7 @@ export default function App() {
             <div>
               <h1 className="text-lg font-black tracking-widest leading-none">COLADOS</h1>
               <p className="text-[9px] theme-muted font-bold tracking-wider mt-0.5">
-                V8.0 · GRAMOS & COSTOS
+                V8.1 · GRAMOS & COSTOS
               </p>
             </div>
           </div>
@@ -891,6 +1034,7 @@ export default function App() {
               onDeletePurchase={handleDeletePurchase}
               onAddExpense={handleAddExpense}
               onDeleteExpense={handleDeleteExpense}
+              onUpdateSupplies={(supplies) => updateState((prev) => ({ ...prev, supplies }))}
               onNotify={showToast}
             />
           )}
@@ -904,6 +1048,8 @@ export default function App() {
               onCancelActiveProcess={handleCancelActiveProcess}
               onEditLog={setEditingLog}
               onDeleteLog={handleDeleteLog}
+              onAdjustManualInventory={handleAdjustManualInventory}
+              onUpdateSupplies={(supplies) => updateState((prev) => ({ ...prev, supplies }))}
               onNotify={showToast}
             />
           )}
@@ -1068,6 +1214,9 @@ export default function App() {
           onExportLegacy={handleExportLegacy}
           onImportJson={handleImportJson}
           onRecoverDirectory={handleRecoverDirectory}
+          onRestoreAutoBackup={handleRestoreAutoBackup}
+          onCopyTextBackup={handleCopyTextBackup}
+          onImportTextBackup={handleImportTextBackup}
         />
 
         <ReceiptModal

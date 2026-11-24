@@ -15,13 +15,16 @@ export function normalizeCartItem(item) {
   const unitPriceCop = Math.max(0, roundCop(item?.unitPriceCop));
   const totalGrams = gramsPerUnit * quantity;
   const lineTotalCop = unitPriceCop * quantity;
+  const packType = ['especial', 'transparente', 'sin_bolsa'].includes(item?.packType)
+    ? item.packType
+    : 'transparente';
 
   return {
     lineId: item?.lineId || `${item?.catalogId || 'custom'}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     catalogId: item?.catalogId ?? null,
     name: String(item?.name || 'Café Tostado').trim(),
-    packType: item?.packType === 'especial' ? 'especial' : 'transparente',
-    hasLabel: item?.hasLabel !== undefined ? Boolean(item.hasLabel) : item?.packType === 'especial',
+    packType,
+    hasLabel: item?.hasLabel !== undefined ? Boolean(item.hasLabel) : packType === 'especial',
     gramsPerUnit,
     quantity,
     unitPriceCop,
@@ -29,7 +32,7 @@ export function normalizeCartItem(item) {
     lineTotalCop,
     stickerType: ['grande', 'pequeño', 'ninguno'].includes(item?.stickerType)
       ? item.stickerType
-      : (item?.packType === 'especial' ? 'grande' : 'ninguno'),
+      : (packType === 'especial' ? 'grande' : 'ninguno'),
     isCustomGranel: Boolean(item?.isCustomGranel),
   };
 }
@@ -213,6 +216,7 @@ export function createSaleRecord({
   items = [],
   method = 'Efectivo COP',
   paidNowCop = 0,
+  customTotalCop = null,
   excessToDebtCop = 0,
   isCredit = false,
   isDonation = false,
@@ -223,7 +227,15 @@ export function createSaleRecord({
   previousDebtCop = 0,
 }) {
   const normalizedItems = items.map(normalizeCartItem);
-  const { totalGrams, totalCop, totalUnits } = computeCartTotals(normalizedItems);
+  const { totalGrams, totalCop: rawSubtotalCop, totalUnits } = computeCartTotals(normalizedItems);
+  const hasCustomTotal =
+    customTotalCop !== null &&
+    customTotalCop !== undefined &&
+    customTotalCop !== '' &&
+    Number.isFinite(Number(customTotalCop)) &&
+    Number(customTotalCop) >= 0;
+  const totalCop = hasCustomTotal ? roundCop(customTotalCop) : rawSubtotalCop;
+  const discountCop = Math.max(0, rawSubtotalCop - totalCop);
   const effectiveMethod = isDonation ? 'Donación' : (isCredit && paidNowCop <= 0 ? 'Crédito' : method);
   const receivedCop = isDonation || isCredit ? 0 : Math.max(0, roundCop(paidNowCop));
   const paidAmountCop = isDonation ? 0 : Math.min(totalCop, receivedCop);
@@ -244,6 +256,8 @@ export function createSaleRecord({
     items: normalizedItems,
     totalGrams,
     totalUnits,
+    subtotalCop: rawSubtotalCop,
+    discountCop,
     cop: totalCop,
     usd: copToUsd(totalCop, rates),
     bs: copToBs(totalCop, rates),

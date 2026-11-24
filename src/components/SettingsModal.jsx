@@ -38,6 +38,9 @@ export default function SettingsModal({
   onExportLegacy,
   onImportJson,
   onRecoverDirectory,
+  onRestoreAutoBackup,
+  onCopyTextBackup,
+  onImportTextBackup,
 }) {
   const {
     theme,
@@ -68,6 +71,8 @@ export default function SettingsModal({
   const [filterProducer, setFilterProducer] = useState('');
   const [showProducerForm, setShowProducerForm] = useState(false);
   const [producerDraft, setProducerDraft] = useState({ name: '', finca: '', sector: '', phone: '' });
+  const [showPasteBox, setShowPasteBox] = useState(false);
+  const [pasteBackupText, setPasteBackupText] = useState('');
 
   if (!isOpen) return null;
 
@@ -157,10 +162,10 @@ export default function SettingsModal({
         {/* Respaldos y Migración */}
         <div className="theme-card p-4 rounded-2xl space-y-2.5">
           <h3 className="text-xs font-black uppercase tracking-wider flex items-center gap-1.5 theme-accent-text">
-            <Database size={15} /> Respaldo Offline y Migración
+            <Database size={15} /> Respaldo Offline y Actualización Segura
           </h3>
           <p className="text-[11px] theme-muted">
-            Al importar un respaldo V6/V7 solo se importan Clientes y Productores sin alterar tus cuentas nuevas.
+            La app guarda automáticamente una copia en Documentos (<b>Colados_AutoRespaldo_V8.json</b>) en cada cambio, y desde V8.1 las nuevas versiones APK se instalan encima sin desinstalar.
           </p>
           <div className="grid grid-cols-2 gap-2">
             <button
@@ -168,13 +173,65 @@ export default function SettingsModal({
               onClick={onExportV8}
               className="theme-subtle py-2.5 px-3 rounded-xl text-[11px] font-black flex items-center justify-center gap-1.5"
             >
-              <Download size={14} /> EXPORTAR V8
+              <Download size={14} /> EXPORTAR JSON
             </button>
             <label className="theme-accent-bg py-2.5 px-3 rounded-xl text-[11px] font-black flex items-center justify-center gap-1.5 cursor-pointer">
               <Save size={14} /> IMPORTAR JSON
               <input type="file" accept=".json" className="hidden" onChange={onImportJson} />
             </label>
           </div>
+          {onRestoreAutoBackup && (
+            <button
+              type="button"
+              onClick={onRestoreAutoBackup}
+              className="w-full theme-info-soft py-2.5 px-3 rounded-xl text-[11px] font-black flex items-center justify-center gap-1.5"
+            >
+              <RotateCcw size={14} /> RESTAURAR AUTO-RESPALDO DE DOCUMENTOS
+            </button>
+          )}
+          <div className="grid grid-cols-2 gap-2">
+            {onCopyTextBackup && (
+              <button
+                type="button"
+                onClick={onCopyTextBackup}
+                className="theme-subtle py-2 px-2.5 rounded-xl text-[10px] font-black"
+              >
+                📋 COPIAR COMO TEXTO
+              </button>
+            )}
+            {onImportTextBackup && (
+              <button
+                type="button"
+                onClick={() => setShowPasteBox((v) => !v)}
+                className="theme-subtle py-2 px-2.5 rounded-xl text-[10px] font-black"
+              >
+                📥 PEGAR RESPALDO TEXTO
+              </button>
+            )}
+          </div>
+          {showPasteBox && onImportTextBackup && (
+            <div className="theme-subtle p-2.5 rounded-xl space-y-2">
+              <textarea
+                rows={3}
+                placeholder="Pega aquí el texto JSON copiado..."
+                value={pasteBackupText}
+                onChange={(e) => setPasteBackupText(e.target.value)}
+                className="w-full p-2 rounded-lg theme-input text-[11px] font-mono"
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  if (onImportTextBackup(pasteBackupText)) {
+                    setPasteBackupText('');
+                    setShowPasteBox(false);
+                  }
+                }}
+                className="w-full theme-accent-bg py-2 rounded-lg text-xs font-black"
+              >
+                RESTAURAR DESDE TEXTO PEGADO
+              </button>
+            </div>
+          )}
           <button
             type="button"
             onClick={onRecoverDirectory}
