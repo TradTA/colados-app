@@ -7,13 +7,13 @@
   },
   "android": {
     "allowMixedContent": true,
-    "backgroundColor": "#09090b",
-    "overrideUserAgent": "Colados-App/7.0"
+    "backgroundColor": "#FBF9F5",
+    "overrideUserAgent": "Colados-App/8.0"
   },
   "plugins": {
     "SplashScreen": {
       "launchShowDuration": 2000,
-      "backgroundColor": "#09090b",
+      "backgroundColor": "#FBF9F5",
       "androidSplashResourceName": "splash",
       "showSpinner": false
     }

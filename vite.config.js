@@ -4,21 +4,21 @@ import { VitePWA } from 'vite-plugin-pwa'
 
 export default defineConfig({
   server: {
-    host: true,   // Expone a la red WiFi local (para Android)
+    host: true,
     port: 5173,
-    open: true,   // Abre el navegador automáticamente
+    open: true,
   },
   plugins: [
     react(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['icons/*.png', 'favicon.ico'],
+      includeAssets: [],
       manifest: {
-        name: 'Colados - Gestión Cafetera',
+        name: 'Colados V8.0 — Gestión Cafetera',
         short_name: 'Colados',
-        description: 'Sistema ERP/CRM offline para Colados Café. Gestión de ventas, compras, inventario y balance.',
-        theme_color: '#facc15',
-        background_color: '#09090b',
+        description: 'Sistema ERP/CRM offline para Colados Café. Ventas multi-producto, inventario en gramos, costos y punto de equilibrio.',
+        theme_color: '#D97706',
+        background_color: '#FBF9F5',
         display: 'standalone',
         display_override: ['standalone', 'fullscreen'],
         orientation: 'portrait',
@@ -26,49 +26,7 @@ export default defineConfig({
         start_url: '/?utm_source=pwa',
         lang: 'es',
         categories: ['business', 'productivity'],
-        icons: [
-          {
-            src: 'icons/icon-72.png',
-            sizes: '72x72',
-            type: 'image/png'
-          },
-          {
-            src: 'icons/icon-96.png',
-            sizes: '96x96',
-            type: 'image/png'
-          },
-          {
-            src: 'icons/icon-128.png',
-            sizes: '128x128',
-            type: 'image/png'
-          },
-          {
-            src: 'icons/icon-192.png',
-            sizes: '192x192',
-            type: 'image/png'
-          },
-          {
-            src: 'icons/icon-512.png',
-            sizes: '512x512',
-            type: 'image/png',
-            purpose: 'any'
-          },
-          {
-            src: 'icons/icon-maskable-512.png',
-            sizes: '512x512',
-            type: 'image/png',
-            purpose: 'maskable'
-          }
-        ],
-        screenshots: [
-          {
-            src: 'icons/screenshot-portrait.png',
-            sizes: '1080x1920',
-            type: 'image/png',
-            form_factor: 'narrow',
-            label: 'Colados - Panel de Ventas'
-          }
-        ]
+        icons: [],
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],

@@ -1,12 +1,13 @@
 {
   "name": "colados-app",
   "private": true,
-  "version": "7.0.0",
+  "version": "8.0.0",
   "type": "module",
   "scripts": {
     "dev": "npx vite",
     "build": "npx vite build",
     "preview": "npx vite preview",
+    "test": "node --test tests/*.test.mjs",
     "cap:sync": "npx cap sync",
     "cap:add:android": "npx cap add android",
     "cap:open:android": "npx cap open android"

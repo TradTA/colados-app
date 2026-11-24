@@ -1,1853 +1,1055 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Coffee, DollarSign, Plus, List, TrendingUp, Trash2,
-  Wallet, PieChart, Package, ArrowRightLeft, CreditCard, Banknote,
-  AlertTriangle, BookOpen, Flame, UserCheck, CheckCircle, Edit3, Save, Factory,
-  Download, MinusCircle, Settings, Share2, ShoppingCart, X, Calendar,
-  BarChart3, Target, Clock, Flag, Bell, ClipboardList, CheckSquare, Database
+  Bell,
+  Coffee,
+  Database,
+  DollarSign,
+  Factory,
+  Moon,
+  Settings,
+  ShoppingCart,
+  Sun,
+  Wallet,
+  X,
 } from 'lucide-react';
-import { Share } from '@capacitor/share';
-import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
-import { Toast as NativeToast } from '@capacitor/toast';
+import BalanceTab from './components/BalanceTab.jsx';
+import ComprasTab from './components/ComprasTab.jsx';
+import FabricaTab from './components/FabricaTab.jsx';
+import {
+  EditProcessModal,
+  EditSaleModal,
+  PaymentModal,
+  ReceiptModal,
+} from './components/Modals.jsx';
+import SettingsModal from './components/SettingsModal.jsx';
+import VentasTab from './components/VentasTab.jsx';
+import { useViewportAndScroll } from './hooks/useViewportAndScroll.js';
+import { computeCostingAnalysis } from './utils/costing.js';
+import { getSaleTotalGrams, recomputeInventoryGrams, toGrams } from './utils/grams.js';
+import {
+  applyClientPayment,
+  applySaleSuppliesDelta,
+  applySingleSalePayment,
+  createSaleRecord,
+  getClientHistorySummary,
+  normalizeKey,
+  recalculateEditedSale,
+} from './utils/ledger.js';
+import {
+  addDaysISO,
+  copToBs,
+  copToUsd,
+  formatDateDisplay,
+  getCurrentMonthKey,
+  getCurrentTimeDisplay,
+  getTodayISO,
+  roundCop,
+} from './utils/money.js';
+import {
+  buildCsvContent,
+  exportTextFileNativeOrWeb,
+  getLegacyRawString,
+  importBackupObject,
+  loadInitialState,
+  normalizeClients,
+  normalizeProducers,
+  saveV8State,
+} from './utils/storage.js';
 
-import { logoBase64 } from './assets/logoBase64';
-
-const round2 = (n) => Math.round(n * 100) / 100;
+const CURRENCIES = ['COP', 'USD', 'BS'];
 
 export default function App() {
+  const [boot] = useState(() => loadInitialState());
+  const [appState, setAppState] = useState(boot.state);
+  const [migrationBanner, setMigrationBanner] = useState(boot.migrationNotice);
   const [activeTab, setActiveTab] = useState('ventas');
   const [showSettings, setShowSettings] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [toast, setToast] = useState('');
 
-  // --- TASAS Y MONEDAS ---
-  // Base principal: COP (Pesos Colombianos)
-  const [rates, setRates] = useState({ 
-    usd_cop: 4100,  // Cuantos COP por 1 USD
-    usd_bs: 45.50,  // Cuantos BS por 1 USD (Paralelo)
-    cop_bs: 0.011,  // Cuantos BS por 1 COP (Calculado o manual)
-  });
-
-  // --- INVENTARIO & INSUMOS ---
-  const [inventory, setInventory] = useState({ pergamino: 0, azul: 0, tostado: 0 });
-  const [supplies, setSupplies] = useState({ 
-    bolsas_kraft: 0, 
-    bolsas_granel: 0,
-    etiquetas: 0,
-    alerta_umbral: 10 
-  });
-  const [donations, setDonations] = useState([]);
-  const [invoiceCounter, setInvoiceCounter] = useState(1);
-
-  // --- CATÁLOGO ---
-  const [catalog, setCatalog] = useState([
-    { id: 1, name: '1 Kg (Granel)',    price: 40000, deductKg: 1.0,  bagType: 'bolsas_granel' },
-    { id: 2, name: '500g (Granel)',    price: 20000, deductKg: 0.5,  bagType: 'bolsas_granel' },
-    { id: 3, name: '250g (Granel)',    price: 10000, deductKg: 0.25, bagType: 'bolsas_granel' },
-    { id: 4, name: '400g (Empacado)',  price: 25000, deductKg: 0.4,  bagType: 'bolsas_kraft' },
-    { id: 5, name: '200g (Empacado)',  price: 15000, deductKg: 0.2,  bagType: 'bolsas_kraft' },
-  ]);
-
-  // --- DIRECTORIO ---
-  const [clients,   setClients]   = useState([]);
-  const [producers, setProducers] = useState([]);
-
-  // --- HISTORIALES ---
-  const [sales,          setSales]          = useState([]);
-  const [purchases,      setPurchases]      = useState([]);
-  const [expenses,       setExpenses]       = useState([]);
-  const [processHistory, setProcessHistory] = useState([]);
-  const [orders,         setOrders]         = useState([]);
-  const [activeProcesses, setActiveProcesses] = useState([]); // Lotes en Proceso
-
-  // --- PAGINACIÓN ---
-  const [visibleSales, setVisibleSales] = useState(10);
-
-  // --- UI TABS ---
-  const getLocalTime = () => {
-    const now = new Date();
-    // Offset para Venezuela/Colombia (UTC-4 / UTC-5)
-    // Para asegurar precisión usamos el offset manual de -4 horas para Vzla
-    const vzlaOffset = -4 * 60; // en minutos
-    const localTime = new Date(now.getTime() + (vzlaOffset + now.getTimezoneOffset()) * 60000);
-    return localTime;
-  };
-  
-  const todayISO = getLocalTime().toISOString().split('T')[0];
-  const [vTab,         setVTab]         = useState('venta');
-  const [activeOrderId,setActiveOrderId]= useState(null);
-  const [orderDate,    setOrderDate]    = useState(todayISO);
-  const [vDate,        setVDate]        = useState(todayISO);
-  const [vClient,      setVClient]      = useState('');
-  const [vProduct,     setVProduct]     = useState('');
-  const [vQuantity,    setVQuantity]    = useState(1);
-  const [vAmountUSD,   setVAmountUSD]   = useState('');
-  const [vMethod,      setVMethod]      = useState('Efectivo COP');
-  const [vSelectedKg,  setVSelectedKg]  = useState(0);
-
-  // Compras
-  const [cTab,      setCTab]      = useState('materia_prima');
-  const [cDate,     setCDate]     = useState(todayISO);
-  const [cProdType, setCProdType] = useState('Pergamino');
-  const [cProducer, setCProducer] = useState('');
-  const [cKg,       setCKg]       = useState('');
-  const [cPriceCOP, setCPriceCOP] = useState('');
-  const [cMethod,   setCMethod]   = useState('Efectivo COP');
-  const [showBuyHistory,  setShowBuyHistory]  = useState(false);
-  const [showOpexHistory, setShowOpexHistory] = useState(false);
-
-  const [oDate,     setODate]     = useState(todayISO);
-  const [oCategory, setOCategory] = useState('Empaques/Bolsas');
-  const [oDesc,     setODesc]     = useState('');
-  const [oAmount,   setOAmount]   = useState('');
-  const [oCurrency, setOCurrency] = useState('COP');
-  const [oMethod,   setOMethod]   = useState('Efectivo COP');
-  const [oIsRecurring, setOIsRecurring] = useState(false);
-
-  const [filterClient, setFilterClient] = useState('');
-  const [filterProducer, setFilterProducer] = useState('');
-
-  const [vStickerType, setVStickerType] = useState('grande');
-  const [balanceSubTab, setBalanceSubTab] = useState('general');
-  const [showUSD, setShowUSD] = useState(false);
+  // Modales
+  const [receiptModal, setReceiptModal] = useState({ isOpen: false, sale: null, statement: null });
+  const [paymentModal, setPaymentModal] = useState({ isOpen: false });
   const [editingSale, setEditingSale] = useState(null);
   const [editingLog, setEditingLog] = useState(null);
 
-  // Fábrica
-  const [fAction,       setFAction]       = useState('trilla');
-  const [chartRange,    setChartRange]    = useState('7D'); // 7D, 30D, 1A
-  const [fDate,         setFDate]         = useState(todayISO);
-  const [producerInput, setProducerInput] = useState('');
-  const [fKgIn,         setFKgIn]         = useState('');
-  const [fKgOut,        setFKgOut]        = useState('');
+  const {
+    isKeyboardOpen,
+    isBottomSheetMinimized,
+    setIsBottomSheetMinimized,
+    handleMainScroll,
+  } = useViewportAndScroll();
 
-  // Config
-  const [editingCatId,       setEditingCatId]       = useState(null);
-  const [editPrice,          setEditPrice]           = useState('');
-  const [showNewClientForm,  setShowNewClientForm]   = useState(false);
-  const [newClientData,      setNewClientData]       = useState({ fullName: '', business: '', sector: '', phone: '' });
-  const [showNewProducerForm,setShowNewProducerForm] = useState(false);
-  const [newProducerData,    setNewProducerData]     = useState({ name: '', finca: '', sector: '', phone: '' });
-
-  // Modales
-  const [toast,       setToast]       = useState('');
-  const [promptModal, setPromptModal] = useState({ isOpen: false, id: null, type: null, method: 'Efectivo COP', amount: 0, maxAmount: 0 });
-  const [invoiceModal,setInvoiceModal]= useState({ isOpen: false, sale: null });
-  const [isSyncing,   setIsSyncing]   = useState(false);
-
-  // ============================================================
-  //  LOCAL STORAGE ENGINE
-  // ============================================================
+  // Aplicar tema claro cálido / modo oscuro
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem('colados_app_v6');
-      if (saved) {
-        const d = JSON.parse(saved);
-        if (d.rates)          setRates(d.rates);
-        if (d.inventory)      setInventory(d.inventory);
-        if (d.supplies)       setSupplies(d.supplies);
-        if (d.donations)      setDonations(d.donations);
-        if (d.invoiceCounter) setInvoiceCounter(d.invoiceCounter);
-        if (d.catalog?.length) setCatalog(d.catalog);
-        if (d.clients)        setClients(d.clients);
-        if (d.producers)      setProducers(d.producers);
-        if (d.sales)          setSales(d.sales);
-        if (d.purchases)      setPurchases(d.purchases);
-        if (d.expenses)       setExpenses(d.expenses);
-        if (d.processHistory) setProcessHistory(d.processHistory);
-        if (d.orders)         setOrders(d.orders);
-        if (d.activeProcesses) setActiveProcesses(d.activeProcesses);
-      }
-    } catch (e) {
-      console.error('Error cargando datos:', e);
+    const theme = appState.theme === 'dark' ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', theme);
+    const metaTheme = document.querySelector('meta[name="theme-color"]');
+    if (metaTheme) {
+      metaTheme.setAttribute('content', theme === 'dark' ? '#09090b' : '#D97706');
     }
+  }, [appState.theme]);
+
+  const showToast = useCallback((msg) => {
+    setToast(msg);
+    if (typeof navigator !== 'undefined' && navigator.vibrate) {
+      navigator.vibrate(35);
+    }
+    import('@capacitor/toast')
+      .then(({ Toast }) => Toast.show({ text: msg, duration: 'short' }))
+      .catch(() => {});
+    setTimeout(() => {
+      setToast((curr) => (curr === msg ? '' : curr));
+    }, 3200);
   }, []);
 
-  const guardarLocal = useCallback((patch) => {
-    setIsSyncing(true);
-    try {
-      const existing = localStorage.getItem('colados_app_v6');
-      const current  = existing ? JSON.parse(existing) : {};
-      localStorage.setItem('colados_app_v6', JSON.stringify({ ...current, ...patch }));
-    } catch (e) {
-      console.error('Error guardando:', e);
-      showToast('⚠️ Memoria llena — libera espacio');
-    }
-    setTimeout(() => setIsSyncing(false), 300);
-  }, []);
-
-  // ============================================================
-  //  EXPORTAR / IMPORTAR
-  // ============================================================
-  const exportData = async () => {
-    const data = localStorage.getItem('colados_app_v6');
-    if (!data) { showToast('No hay datos para exportar'); return; }
-    const fileName = `Colados_Respaldo_${formatDate(todayISO).replace(/\//g, '-')}.json`;
-    
-    try {
-      const result = await Filesystem.writeFile({
-        path: fileName,
-        data: data,
-        directory: Directory.Documents,
-        encoding: Encoding.UTF8
-      });
-      showToast(`¡Guardado en carpeta Documentos!\n${fileName}`);
-    } catch (e) {
-      console.error('Error nativo:', e);
-      // Fallback a descarga web
-      const blob = new Blob([data], { type: 'application/json' });
-      const url  = URL.createObjectURL(blob);
-      const a    = document.createElement('a');
-      a.href     = url;
-      a.download = fileName;
-      a.click();
-      URL.revokeObjectURL(url);
-      showToast('¡Respaldo descargado!');
-    }
-  };
-
-  const repairData = (dataObj) => {
-    let p = 0, a = 0, t = 0;
-    if (dataObj.purchases) {
-      dataObj.purchases.forEach(comp => {
-        if (comp.coffeeType === 'Pergamino') p += comp.kg;
-        if (comp.coffeeType === 'Azul') a += comp.kg;
-        if (comp.coffeeType === 'Tostado') t += comp.kg;
-      });
-    }
-    if (dataObj.processHistory) {
-      dataObj.processHistory.forEach(log => {
-        if (log.type === 'trilla') {
-          p -= log.input;
-          a += log.output;
-        } else if (log.type === 'tueste') {
-          a -= log.input;
-          t += log.output;
+  const updateState = useCallback(
+    (updater) => {
+      setIsSyncing(true);
+      setAppState((prev) => {
+        const next = typeof updater === 'function' ? updater(prev) : { ...prev, ...updater };
+        const saved = saveV8State(next);
+        if (!saved) {
+          showToast('⚠️ Memoria llena — exporta un respaldo');
         }
+        return next;
       });
-    }
-    if (dataObj.sales) {
-      dataObj.sales.forEach(s => {
-        if (s.kgSold) t -= (s.kgSold * (s.quantity || 1));
+      setTimeout(() => setIsSyncing(false), 260);
+    },
+    [showToast]
+  );
+
+  const costing = useMemo(
+    () =>
+      computeCostingAnalysis(appState.costConfig, appState.catalog, {
+        purchases: appState.purchases,
+        sales: appState.sales,
+        expenses: appState.expenses,
+        processHistory: appState.processHistory,
+        monthKey: getCurrentMonthKey(),
+      }),
+    [
+      appState.costConfig,
+      appState.catalog,
+      appState.purchases,
+      appState.sales,
+      appState.expenses,
+      appState.processHistory,
+    ]
+  );
+
+  // ============================================================
+  //  ACCIONES: VENTAS & PEDIDOS
+  // ============================================================
+  const handleRegisterSale = ({
+    dateISO,
+    clientName,
+    items,
+    method,
+    isCredit,
+    isDonation,
+    paidNowCop,
+    excessToDebtCop,
+    previousDebtCop,
+    activeOrder,
+  }) => {
+    const iso = dateISO || getTodayISO();
+    const dateStr = formatDateDisplay(iso);
+    const timeStr = getCurrentTimeDisplay();
+
+    updateState((prev) => {
+      const sale = createSaleRecord({
+        id: Date.now(),
+        invoiceCounter: prev.invoiceCounter,
+        clientName,
+        items,
+        method,
+        paidNowCop,
+        excessToDebtCop,
+        isCredit,
+        isDonation,
+        date: dateStr,
+        isoDate: iso,
+        time: timeStr,
+        rates: prev.rates,
+        previousDebtCop,
       });
-    }
-    return { 
-      pergamino: round2(Math.max(0, p)), 
-      azul: round2(Math.max(0, a)), 
-      tostado: round2(Math.max(0, t)) 
-    };
+
+      let nextSales = [sale, ...prev.sales];
+      if (!isDonation && excessToDebtCop > 0) {
+        const applied = applyClientPayment(
+          nextSales,
+          clientName,
+          excessToDebtCop,
+          method,
+          dateStr,
+          iso
+        );
+        nextSales = applied.updatedSales;
+      }
+
+      const nextInventory = {
+        ...prev.inventoryGrams,
+        tostado: Math.max(0, (prev.inventoryGrams?.tostado || 0) - sale.totalGrams),
+      };
+      const nextSupplies = applySaleSuppliesDelta(prev.supplies, sale.items, -1);
+
+      let nextOrders = prev.orders;
+      if (activeOrder) {
+        nextOrders = prev.orders.filter((o) => o.id !== activeOrder.id);
+        if (activeOrder.isRecurring) {
+          const nextIso = addDaysISO(activeOrder.isoDate || iso, 7);
+          nextOrders = [
+            {
+              ...activeOrder,
+              id: Date.now() + 2,
+              isoDate: nextIso,
+              date: formatDateDisplay(nextIso),
+            },
+            ...nextOrders,
+          ];
+        }
+      }
+
+      const umbral = nextSupplies.alerta_umbral ?? 10;
+      if (
+        nextSupplies.bolsas_especiales <= umbral ||
+        nextSupplies.bolsas_transparentes <= umbral ||
+        nextSupplies.etiquetas <= umbral
+      ) {
+        setTimeout(() => showToast('⚠️ ¡Insumos (bolsas o etiquetas) por agotarse!'), 300);
+      }
+
+      return {
+        ...prev,
+        sales: nextSales,
+        inventoryGrams: nextInventory,
+        supplies: nextSupplies,
+        orders: nextOrders,
+        invoiceCounter: prev.invoiceCounter + 1,
+      };
+    });
+
+    showToast('✅ Venta registrada en V8.0');
   };
 
-  const importData = (event) => {
-    const file = event.target.files[0];
+  const handleDeleteSale = (saleId) => {
+    updateState((prev) => {
+      const target = prev.sales.find((s) => s.id === saleId);
+      if (!target) return prev;
+      const returnedGrams = getSaleTotalGrams(target);
+      const nextInventory = {
+        ...prev.inventoryGrams,
+        tostado: Math.max(0, (prev.inventoryGrams?.tostado || 0) + returnedGrams),
+      };
+      const nextSupplies = applySaleSuppliesDelta(prev.supplies, target.items || [], +1);
+      return {
+        ...prev,
+        sales: prev.sales.filter((s) => s.id !== saleId),
+        inventoryGrams: nextInventory,
+        supplies: nextSupplies,
+      };
+    });
+    showToast('Venta eliminada y gramos/insumos devueltos');
+  };
+
+  const handleSaveEditedSale = (editedDraft) => {
+    updateState((prev) => {
+      const oldSale = prev.sales.find((s) => s.id === editedDraft.id);
+      if (!oldSale) return prev;
+      const { sale, gramsDelta, oldItems, newItems } = recalculateEditedSale(
+        oldSale,
+        editedDraft,
+        prev.rates
+      );
+      const revertedSupplies = applySaleSuppliesDelta(prev.supplies, oldItems, +1);
+      const nextSupplies = applySaleSuppliesDelta(revertedSupplies, newItems, -1);
+      const nextInventory = {
+        ...prev.inventoryGrams,
+        tostado: Math.max(0, (prev.inventoryGrams?.tostado || 0) - gramsDelta),
+      };
+      return {
+        ...prev,
+        sales: prev.sales.map((s) => (s.id === sale.id ? sale : s)),
+        inventoryGrams: nextInventory,
+        supplies: nextSupplies,
+      };
+    });
+    setEditingSale(null);
+    showToast('✅ Venta actualizada');
+  };
+
+  const handleCreateOrder = (orderPayload) => {
+    const iso = orderPayload.isoDate || getTodayISO();
+    const newOrder = {
+      id: Date.now(),
+      ...orderPayload,
+      isoDate: iso,
+      date: formatDateDisplay(iso),
+      status: 'pending',
+    };
+    updateState((prev) => ({ ...prev, orders: [newOrder, ...prev.orders] }));
+    showToast('📅 Pedido agendado');
+  };
+
+  const handleDeleteOrder = (orderId) => {
+    updateState((prev) => ({
+      ...prev,
+      orders: prev.orders.filter((o) => o.id !== orderId),
+    }));
+    showToast('Pedido eliminado');
+  };
+
+  // ============================================================
+  //  ACCIONES: COMPRAS & OPEX
+  // ============================================================
+  const handleAddPurchase = ({ isoDate, coffeeType, producer, grams, pricePerKgCop, cop, method, isCredit }) => {
+    updateState((prev) => {
+      const paidAmountCop = isCredit ? 0 : cop;
+      const balanceDueCop = isCredit ? cop : 0;
+      const newPurchase = {
+        id: Date.now(),
+        type: 'Materia Prima',
+        coffeeType,
+        producer,
+        grams,
+        pricePerKgCop,
+        cop,
+        usd: copToUsd(cop, prev.rates),
+        bs: copToBs(cop, prev.rates),
+        method: isCredit ? 'Crédito' : method,
+        isPaid: !isCredit,
+        paidAmountCop,
+        balanceDueCop,
+        payments: !isCredit && cop > 0
+          ? [{ id: Date.now() + 1, date: formatDateDisplay(isoDate), isoDate, amountCop: cop, method }]
+          : [],
+        date: formatDateDisplay(isoDate),
+        isoDate,
+      };
+
+      const nextInv = { ...prev.inventoryGrams };
+      if (coffeeType === 'Pergamino') nextInv.pergamino = (nextInv.pergamino || 0) + grams;
+      if (coffeeType === 'Azul') nextInv.azul = (nextInv.azul || 0) + grams;
+
+      return {
+        ...prev,
+        purchases: [newPurchase, ...prev.purchases],
+        inventoryGrams: nextInv,
+      };
+    });
+    showToast('✅ Materia prima sumada en gramos');
+  };
+
+  const handleDeletePurchase = (id) => {
+    updateState((prev) => {
+      const target = prev.purchases.find((p) => p.id === id);
+      if (!target) return prev;
+      const g = Number.isFinite(Number(target.grams)) ? target.grams : toGrams(target.kg, 'kg');
+      const nextInv = { ...prev.inventoryGrams };
+      if (target.coffeeType === 'Pergamino') nextInv.pergamino = Math.max(0, (nextInv.pergamino || 0) - g);
+      if (target.coffeeType === 'Azul') nextInv.azul = Math.max(0, (nextInv.azul || 0) - g);
+      return {
+        ...prev,
+        purchases: prev.purchases.filter((p) => p.id !== id),
+        inventoryGrams: nextInv,
+      };
+    });
+    showToast('Compra eliminada e inventario revertido');
+  };
+
+  const handleAddExpense = ({ isoDate, category, isFixed, description, originalAmount, originalCurrency, cop, method }) => {
+    updateState((prev) => {
+      const newExp = {
+        id: Date.now(),
+        category,
+        isFixed: Boolean(isFixed),
+        description,
+        originalAmount,
+        originalCurrency,
+        cop,
+        usd: copToUsd(cop, prev.rates),
+        bs: copToBs(cop, prev.rates),
+        method,
+        date: formatDateDisplay(isoDate),
+        isoDate,
+      };
+      return { ...prev, expenses: [newExp, ...prev.expenses] };
+    });
+    showToast('✅ Gasto operativo registrado');
+  };
+
+  const handleDeleteExpense = (id) => {
+    updateState((prev) => ({
+      ...prev,
+      expenses: prev.expenses.filter((e) => e.id !== id),
+    }));
+    showToast('Gasto eliminado');
+  };
+
+  // ============================================================
+  //  ACCIONES: FÁBRICA (TRILLA & TUESTE)
+  // ============================================================
+  const handleCompleteProcess = ({
+    type,
+    producer,
+    inputGrams,
+    outputGrams,
+    mermaPct,
+    gasCostCop,
+    estimatedProfitCop,
+    isoDate,
+  }) => {
+    updateState((prev) => {
+      const nextInv = { ...prev.inventoryGrams };
+      if (type === 'trilla') {
+        nextInv.pergamino = Math.max(0, (nextInv.pergamino || 0) - inputGrams);
+        nextInv.azul = (nextInv.azul || 0) + outputGrams;
+      } else {
+        nextInv.azul = Math.max(0, (nextInv.azul || 0) - inputGrams);
+        nextInv.tostado = (nextInv.tostado || 0) + outputGrams;
+      }
+
+      const log = {
+        id: Date.now(),
+        type,
+        producer,
+        inputGrams,
+        outputGrams,
+        mermaPct,
+        gasCostCop,
+        estimatedProfitCop,
+        date: formatDateDisplay(isoDate),
+        isoDate,
+      };
+
+      return {
+        ...prev,
+        inventoryGrams: nextInv,
+        processHistory: [log, ...prev.processHistory],
+      };
+    });
+    showToast('✅ Lote procesado y sumado al inventario');
+  };
+
+  const handleSaveActiveProcess = ({ type, producer, inputGrams, isoDate }) => {
+    updateState((prev) => {
+      const nextInv = { ...prev.inventoryGrams };
+      if (type === 'trilla') nextInv.pergamino = Math.max(0, (nextInv.pergamino || 0) - inputGrams);
+      else nextInv.azul = Math.max(0, (nextInv.azul || 0) - inputGrams);
+
+      const active = {
+        id: Date.now(),
+        type,
+        producer,
+        inputGrams,
+        date: formatDateDisplay(isoDate),
+        isoDate,
+      };
+      return {
+        ...prev,
+        inventoryGrams: nextInv,
+        activeProcesses: [active, ...prev.activeProcesses],
+      };
+    });
+    showToast('⏳ Lote en curso guardado');
+  };
+
+  const handleResumeActiveProcess = (activeId) => {
+    const target = appState.activeProcesses.find((a) => a.id === activeId);
+    if (!target) return null;
+    updateState((prev) => {
+      const nextInv = { ...prev.inventoryGrams };
+      if (target.type === 'trilla') nextInv.pergamino = (nextInv.pergamino || 0) + target.inputGrams;
+      else nextInv.azul = (nextInv.azul || 0) + target.inputGrams;
+      return {
+        ...prev,
+        inventoryGrams: nextInv,
+        activeProcesses: prev.activeProcesses.filter((a) => a.id !== activeId),
+      };
+    });
+    return target;
+  };
+
+  const handleCancelActiveProcess = (activeId) => {
+    handleResumeActiveProcess(activeId);
+    showToast('Lote en curso cancelado y gramos devueltos');
+  };
+
+  const handleSaveEditedLog = (updatedLog) => {
+    updateState((prev) => {
+      const oldLog = prev.processHistory.find((l) => l.id === updatedLog.id);
+      if (!oldLog) return prev;
+      const nextInv = { ...prev.inventoryGrams };
+      const oldIn = Number(oldLog.inputGrams) || 0;
+      const oldOut = Number(oldLog.outputGrams) || 0;
+      const newIn = Number(updatedLog.inputGrams) || 0;
+      const newOut = Number(updatedLog.outputGrams) || 0;
+
+      if (oldLog.type === 'trilla') {
+        nextInv.pergamino = Math.max(0, (nextInv.pergamino || 0) + oldIn - newIn);
+        nextInv.azul = Math.max(0, (nextInv.azul || 0) - oldOut + newOut);
+      } else {
+        nextInv.azul = Math.max(0, (nextInv.azul || 0) + oldIn - newIn);
+        nextInv.tostado = Math.max(0, (nextInv.tostado || 0) - oldOut + newOut);
+      }
+
+      return {
+        ...prev,
+        inventoryGrams: nextInv,
+        processHistory: prev.processHistory.map((l) => (l.id === updatedLog.id ? updatedLog : l)),
+      };
+    });
+    setEditingLog(null);
+    showToast('✅ Lote actualizado');
+  };
+
+  const handleDeleteLog = (logId) => {
+    updateState((prev) => {
+      const target = prev.processHistory.find((l) => l.id === logId);
+      if (!target) return prev;
+      const nextInv = { ...prev.inventoryGrams };
+      if (target.type === 'trilla') {
+        nextInv.pergamino = (nextInv.pergamino || 0) + (target.inputGrams || 0);
+        nextInv.azul = Math.max(0, (nextInv.azul || 0) - (target.outputGrams || 0));
+      } else {
+        nextInv.azul = (nextInv.azul || 0) + (target.inputGrams || 0);
+        nextInv.tostado = Math.max(0, (nextInv.tostado || 0) - (target.outputGrams || 0));
+      }
+      return {
+        ...prev,
+        inventoryGrams: nextInv,
+        processHistory: prev.processHistory.filter((l) => l.id !== logId),
+      };
+    });
+    showToast('Proceso revertido y eliminado');
+  };
+
+  // ============================================================
+  //  ACCIONES: ABONOS, EXPORTACIÓN Y DIRECTORIOS
+  // ============================================================
+  const handleConfirmPayment = ({ mode, clientName, sale, purchase, amountCop, method, isoDate }) => {
+    const pay = roundCop(amountCop);
+    if (pay <= 0) {
+      showToast('⚠️ Ingresa un monto válido');
+      return;
+    }
+    const dateStr = formatDateDisplay(isoDate);
+
+    if (mode === 'client_fifo') {
+      updateState((prev) => {
+        const res = applyClientPayment(prev.sales, clientName, pay, method, dateStr, isoDate);
+        return { ...prev, sales: res.updatedSales };
+      });
+      showToast('✅ Abono aplicado a cuenta acumulada');
+    } else if (mode === 'cxc_single' && sale) {
+      updateState((prev) => ({
+        ...prev,
+        sales: applySingleSalePayment(prev.sales, sale.id, pay, method, dateStr, isoDate),
+      }));
+      showToast('✅ Abono registrado');
+    } else if (mode === 'cxp_single' && purchase) {
+      updateState((prev) => ({
+        ...prev,
+        purchases: prev.purchases.map((p) => {
+          if (p.id !== purchase.id) return p;
+          const total = roundCop(p.cop);
+          const currentPaid = roundCop(p.paidAmountCop);
+          const slice = Math.min(Math.max(0, total - currentPaid), pay);
+          const newPaid = currentPaid + slice;
+          const newBalance = Math.max(0, total - newPaid);
+          return {
+            ...p,
+            paidAmountCop: newPaid,
+            balanceDueCop: newBalance,
+            isPaid: newBalance === 0,
+            payments: [
+              ...(Array.isArray(p.payments) ? p.payments : []),
+              { id: Date.now(), date: dateStr, isoDate, amountCop: slice, method },
+            ],
+          };
+        }),
+      }));
+      showToast('✅ Pago a productor registrado');
+    }
+
+    setPaymentModal({ isOpen: false });
+  };
+
+  const handleExportCsv = async (type) => {
+    let rows = [];
+    let fileName = `Colados_${type}_${getTodayISO()}.csv`;
+
+    if (type === 'ventas') {
+      rows = appState.sales.map((s) => ({
+        Recibo: s.invoiceNum,
+        Fecha: s.date,
+        Cliente: s.clientName,
+        Detalle: (s.items || []).map((i) => `${i.quantity}x ${i.name}`).join(' + '),
+        Gramos: getSaleTotalGrams(s),
+        TotalCOP: s.cop,
+        PagadoCOP: s.paidAmountCop,
+        PendienteCOP: s.balanceDueCop,
+        Metodo: s.method,
+      }));
+    } else if (type === 'compras') {
+      rows = appState.purchases.map((p) => ({
+        Fecha: p.date,
+        Productor: p.producer,
+        Cafe: p.coffeeType,
+        Gramos: p.grams,
+        PrecioKgCOP: p.pricePerKgCop,
+        TotalCOP: p.cop,
+        Metodo: p.method,
+        PendienteCOP: p.balanceDueCop,
+      }));
+    } else if (type === 'gastos') {
+      rows = appState.expenses.map((e) => ({
+        Fecha: e.date,
+        Categoria: e.category,
+        Tipo: e.isFixed ? 'Fijo/Indirecto' : 'Directo/Variable',
+        Detalle: e.description,
+        MontoOriginal: `${e.originalAmount} ${e.originalCurrency}`,
+        TotalCOP: e.cop,
+        Metodo: e.method,
+      }));
+    } else if (type === 'procesos') {
+      rows = appState.processHistory.map((l) => ({
+        Fecha: l.date,
+        Tipo: l.type,
+        Productor: l.producer,
+        EntradaGramos: l.inputGrams,
+        SalidaGramos: l.outputGrams,
+        MermaPct: l.mermaPct,
+      }));
+    } else if (type === 'clientes') {
+      rows = appState.clients.map((c) => ({
+        Nombre: c.fullName,
+        Negocio: c.business,
+        Sector: c.sector,
+        Telefono: c.phone,
+      }));
+    } else if (type === 'productores') {
+      rows = appState.producers.map((p) => ({
+        Nombre: p.name,
+        Finca: p.finca,
+        Sector: p.sector,
+        Telefono: p.phone,
+      }));
+    } else if (type === 'clientes_resumen') {
+      rows = appState.clients.map((c) => {
+        const sum = getClientHistorySummary(appState.sales, c.fullName);
+        return {
+          Cliente: c.fullName,
+          Visitas: sum.visits,
+          Gramos: sum.totalGrams,
+          TotalCompradoCOP: sum.totalBoughtCop,
+          TotalPagadoCOP: sum.totalPaidCop,
+          SaldoPendienteCOP: sum.debtCop,
+        };
+      });
+    } else if (type === 'productores_calidad') {
+      rows = appState.producers.map((p) => {
+        const logs = appState.processHistory.filter(
+          (l) => normalizeKey(l.producer) === normalizeKey(p.name)
+        );
+        const inG = logs.reduce((a, b) => a + (b.inputGrams || 0), 0);
+        const outG = logs.reduce((a, b) => a + (b.outputGrams || 0), 0);
+        const avgMerma = inG > 0 ? Math.round(((inG - outG) / inG) * 1000) / 10 : 0;
+        return { Productor: p.name, EntradaGramos: inG, SalidaGramos: outG, MermaPct: `${avgMerma}%` };
+      });
+    }
+
+    if (!rows.length) {
+      showToast('No hay registros para exportar');
+      return;
+    }
+
+    try {
+      const csv = buildCsvContent(rows);
+      const res = await exportTextFileNativeOrWeb(csv, fileName, 'text/csv;charset=utf-8;');
+      showToast(res.native ? `CSV guardado en Documentos: ${fileName}` : `CSV descargado: ${fileName}`);
+    } catch {
+      showToast('Error exportando CSV');
+    }
+  };
+
+  const handleExportV8 = async () => {
+    const fileName = `Colados_V8_Respaldo_${getTodayISO()}.json`;
+    try {
+      const res = await exportTextFileNativeOrWeb(
+        JSON.stringify(appState, null, 2),
+        fileName,
+        'application/json'
+      );
+      showToast(res.native ? `Guardado en Documentos: ${fileName}` : 'Respaldo V8.0 descargado');
+    } catch {
+      showToast('Error exportando respaldo');
+    }
+  };
+
+  const handleExportLegacy = async () => {
+    const raw = getLegacyRawString();
+    if (!raw) {
+      showToast('No hay respaldo histórico v6/v7');
+      return;
+    }
+    const fileName = `Colados_Historico_v6_${getTodayISO()}.json`;
+    try {
+      const res = await exportTextFileNativeOrWeb(raw, fileName, 'application/json');
+      showToast(res.native ? `Histórico guardado en Documentos: ${fileName}` : 'Histórico descargado');
+    } catch {
+      showToast('Error exportando histórico');
+    }
+  };
+
+  const handleImportJson = (event) => {
+    const file = event.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
-        const json = JSON.parse(e.target.result);
-        if (json && typeof json === 'object') {
-          json.inventory = repairData(json);
-          localStorage.setItem('colados_app_v6', JSON.stringify(json));
-          showToast('¡Datos restaurados y adaptados! Reiniciando...');
-          setTimeout(() => window.location.reload(), 1500);
+        const parsed = JSON.parse(e.target.result);
+        const res = importBackupObject(parsed, appState);
+        updateState(res.state);
+        if (res.mode === 'v8_full') {
+          showToast('✅ Respaldo V8.0 restaurado completo');
+        } else {
+          showToast(
+            `✅ Directorio importado: +${res.addedClients} clientes, +${res.addedProducers} productores`
+          );
         }
-      } catch { showToast('Error: Archivo de respaldo inválido'); }
+      } catch {
+        showToast('⚠️ Archivo JSON inválido');
+      }
     };
     reader.readAsText(file);
+    event.target.value = '';
   };
 
-  const exportToCSV = (data, fileName) => {
-    if (!data || data.length === 0) { showToast('No hay datos para exportar'); return; }
-    const headers = Object.keys(data[0]).join(',');
-    const rows = data.map(obj => Object.values(obj).map(v => typeof v === 'string' ? `"${v.replace(/"/g, '""')}"` : v).join(','));
-    const csvContent = "\uFEFF" + [headers, ...rows].join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.setAttribute('download', `${fileName}.csv`);
-    link.click();
-    showToast('Reporte CSV generado');
+  const cycleDisplayCurrency = () => {
+    const idx = CURRENCIES.indexOf(appState.displayCurrency || 'COP');
+    const next = CURRENCIES[(idx + 1) % CURRENCIES.length];
+    updateState((prev) => ({ ...prev, displayCurrency: next }));
   };
 
-  // ============================================================
-  //  UTILIDADES
-  // ============================================================  // --- UI HELPERS ---
-  const formatDate = (iso) => {
-    if(!iso) return '';
-    const [y,m,d] = iso.split('-');
-    return `${d}/${m}/${y}`;
-  };
+  const currencyLabel =
+    appState.displayCurrency === 'USD'
+      ? '🇺🇸 USD'
+      : appState.displayCurrency === 'BS'
+        ? '🇻🇪 BS'
+        : '🇨🇴 COP';
 
-  const showToast = (msg) => {
-    setToast(msg);
-    if (navigator.vibrate) navigator.vibrate(40);
-    // Usar Toast nativo si está disponible
-    NativeToast.show({ text: msg, duration: 'short' }).catch(()=>{});
-    setTimeout(() => setToast(''), 3000);
-  };
-
-  const openInvoice = (sale) => setInvoiceModal({ isOpen: true, sale });
-
-  const isOverdue = (isoDate) => {
-    if (!isoDate) return false;
-    return (Date.now() - new Date(isoDate).getTime()) / 86400000 > 7;
-  };
-
-  const expenseCategories = ['Empaques/Bolsas','Etiquetas','Gas','Electricidad/Agua','Mantenimiento/Equipos','Transporte/Envíos','Insumos','Otros'];
-  const paymentMethods    = ['Efectivo COP','Efectivo USD','Efectivo BS','Pago Móvil','Bancolombia','Binance', 'Donación'];
-
-  // ============================================================
-  //  FACTURA — CANVAS IMAGE
-  // ============================================================
-  const downloadInvoiceImage = (sale) => {
-    const scale = 3;
-    const canvas = document.createElement('canvas');
-    canvas.width  = 400 * scale; 
-    canvas.height = 620 * scale;
-    const ctx = canvas.getContext('2d');
-    ctx.scale(scale, scale);
-
-    const logo = new Image();
-    logo.src = logoBase64; 
-    logo.onload = async () => {
-      // ... (Lógica de dibujo igual que antes) ...
-      ctx.fillStyle = '#09090b'; ctx.fillRect(0, 0, 400, 620);
-      ctx.strokeStyle = '#facc15'; ctx.lineWidth = 4; ctx.strokeRect(10, 10, 380, 600);
-      ctx.save();
-      ctx.beginPath(); ctx.arc(200, 70, 45, 0, Math.PI * 2); ctx.clip();
-      ctx.drawImage(logo, 155, 25, 90, 90);
-      ctx.restore();
-      ctx.textAlign = 'center';
-      ctx.fillStyle = '#facc15'; ctx.font = '900 32px sans-serif'; ctx.fillText('COLADOS', 200, 140);
-      ctx.fillStyle = '#a1a1aa'; ctx.font = 'italic 13px sans-serif'; ctx.fillText('"Con el rico aroma al amanecer"', 200, 160);
-      const dashedLine = (y) => { ctx.setLineDash([5,5]); ctx.strokeStyle='#3f3f46'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(30,y); ctx.lineTo(370,y); ctx.stroke(); ctx.setLineDash([]); };
-      dashedLine(180);
-      ctx.textAlign='left'; ctx.font='14px sans-serif'; ctx.fillStyle='#a1a1aa';
-      ctx.fillText('Recibo:', 40, 210); ctx.fillText('Fecha:', 40, 240); ctx.fillText('Cliente:', 40, 270);
-      ctx.textAlign='right'; ctx.fillStyle='#f4f4f5'; ctx.font='bold 14px sans-serif';
-      ctx.fillText(`#${sale.invoiceNum || sale.id.toString().slice(-4)}`, 360, 210);
-      ctx.fillText(sale.date, 360, 240);
-      ctx.fillStyle='#facc15'; ctx.fillText(sale.clientName, 360, 270);
-      dashedLine(290);
-      ctx.textAlign='left'; ctx.fillStyle='#a1a1aa'; ctx.font='12px sans-serif';
-      ctx.fillText('CANT.  PRODUCTO', 40, 320);
-      ctx.fillStyle='#f4f4f5'; ctx.font='bold 16px sans-serif';
-      ctx.fillText(`${sale.quantity||1}x  ${sale.product}`, 40, 345);
-      dashedLine(370);
-      ctx.fillStyle='#a1a1aa'; ctx.font='14px sans-serif';
-      ctx.fillText('Total COP:', 40, 400); ctx.fillText('Ref USD:', 40, 430); ctx.fillText('Ref BS:', 40, 460);
-      ctx.textAlign='right';
-      ctx.fillStyle='#4ade80'; ctx.font='900 24px sans-serif'; ctx.fillText(`$${(sale.cop||0).toLocaleString('es-CO')}`, 360, 400);
-      ctx.fillStyle='#f4f4f5'; ctx.font='bold 14px sans-serif';
-      ctx.fillText(`USD ${(sale.usd||0).toFixed(2)}`, 360, 430);
-      ctx.fillText(`Bs ${(sale.bs||0).toFixed(2)}`, 360, 460);
-      dashedLine(485);
-      ctx.fillStyle = sale.isPaid ? '#166534' : '#9a3412';
-      ctx.fillRect(50, 500, 300, 34);
-      ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.font='bold 13px sans-serif';
-      let st = 'CRÉDITO PENDIENTE';
-      if (sale.method === 'Donación') st = 'DONACIÓN / CORTESÍA';
-      else if (sale.isPaid) st = `PAGADO — ${sale.method}`;
-      else if (sale.paidAmount > 0) st = `ABONO $${sale.paidAmount.toLocaleString('es-CO')}`;
-      ctx.fillText(st, 200, 522);
-      ctx.fillStyle='#52525b'; ctx.font='bold 10px sans-serif';
-      ctx.fillText('App hecha por Harvey Cárdenas', 200, 570);
-      ctx.font='8px sans-serif';
-      ctx.fillText('colados.app — offline-first ERP', 200, 585);
-
-      const fileName = `Factura_Colados_${sale.invoiceNum || sale.id}.png`;
-      const base64Data = canvas.toDataURL('image/png').split(',')[1];
-
-      try {
-        const result = await Filesystem.writeFile({
-          path: fileName,
-          data: base64Data,
-          directory: Directory.Cache
-        });
-        await Share.share({
-          title: 'Factura Colados',
-          url: result.uri
-        });
-      } catch (e) {
-        console.error('Error nativo:', e);
-        const a = document.createElement('a');
-        a.href     = canvas.toDataURL('image/png');
-        a.download = fileName;
-        a.click();
-      }
-    };
-    logo.onerror = () => showToast('Error cargando logo');
-  };
-
-  // ============================================================
-  //  COMPARTIR — FIX: usar Clipboard API moderna
-  // ============================================================
-  const shareInvoiceText = async (sale) => {
-    let st = 'CRÉDITO PENDIENTE';
-    if (sale.isPaid) st = `PAGADO (${sale.method})`;
-    else if (sale.paidAmount > 0) st = `ABONO PARCIAL ($${sale.paidAmount.toFixed(2)})`;
-
-    const text = `☕ *COLADOS CAFÉ* ☕\n_"Con el rico aroma al amanecer"_\n\n*Recibo:* #${sale.invoiceNum || sale.id.toString().slice(-4)}\n*Fecha:* ${sale.date}\n*Cliente:* ${sale.clientName}\n\n*Detalle:* ${sale.quantity||1}x ${sale.product}\n*Total:* $${(sale.cop||0).toLocaleString('es-CO')} COP / USD ${sale.usd.toFixed(2)}\n*Estado:* ${st}\n\n_¡Gracias por preferir la calidad de nuestros andes!_\n\n_App hecha por Harvey Cárdenas_`;
-
-    // Web Share API (Android nativo) o Clipboard API
-    if (navigator.share) {
-      try { await navigator.share({ title: 'Factura Colados', text }); return; } catch {}
-    }
-    try {
-      await navigator.clipboard.writeText(text);
-      showToast('¡Texto copiado! Pégalo en WhatsApp.');
-    } catch {
-      showToast('Error al copiar texto.');
-    }
-  };
-
-  // ============================================================
-  //  DELETE helpers
-  // ============================================================
-  const deleteSale = (id) => {
-    const saleToDelete = sales.find(s => s.id === id);
-    if (saleToDelete) {
-      const totalKgToReturn = (saleToDelete.kgSold || 0) * (saleToDelete.quantity || 1);
-      const newInv = { ...inventory, tostado: round2(inventory.tostado + totalKgToReturn) };
-      
-      const catItem = catalog.find(p => p.name === saleToDelete.product);
-      const newSupplies = { ...supplies };
-      if (catItem && catItem.bagType) {
-        newSupplies[catItem.bagType] += (saleToDelete.quantity || 1);
-        if (catItem.bagType === 'bolsas_kraft') newSupplies.etiquetas += (saleToDelete.quantity || 1);
-      }
-      
-      setInventory(newInv); setSupplies(newSupplies);
-      const n = sales.filter(s => s.id !== id);
-      setSales(n);
-      guardarLocal({ sales: n, inventory: newInv, supplies: newSupplies });
-      showToast('Venta eliminada y stock devuelto');
-    }
-  };
-  const deleteExpense = (id) => {
-    const n = expenses.filter(e => e.id !== id);
-    setExpenses(n); guardarLocal({ expenses: n }); showToast('Gasto eliminado');
-  };
-  const deletePurchase = (id) => {
-    const pToDelete = purchases.find(p => p.id === id);
-    if (pToDelete) {
-      const newInv = { ...inventory };
-      const kgToRemove = pToDelete.kg || 0;
-      if (pToDelete.coffeeType === 'Pergamino') newInv.pergamino = round2(Math.max(0, newInv.pergamino - kgToRemove));
-      if (pToDelete.coffeeType === 'Azul')      newInv.azul      = round2(Math.max(0, newInv.azul - kgToRemove));
-      
-      setInventory(newInv);
-      const n = purchases.filter(p => p.id !== id);
-      setPurchases(n);
-      guardarLocal({ purchases: n, inventory: newInv });
-      showToast('Compra eliminada e inventario revertido');
-    }
-  };
-
-  // ============================================================
-  //  RENDER: VENTAS & PEDIDOS
-  // ============================================================
-  const deleteLog = (id) => {
-    const log = processHistory.find(l => l.id === id);
-    if (!log) return;
-    const newInv = { ...inventory };
-    if (log.type === 'trilla') {
-      newInv.pergamino = round2(newInv.pergamino + log.input);
-      newInv.azul = round2(Math.max(0, newInv.azul - log.output));
-    } else {
-      newInv.azul = round2(newInv.azul + log.input);
-      newInv.tostado = round2(Math.max(0, newInv.tostado - log.output));
-    }
-    const n = processHistory.filter(l => l.id !== id);
-    setProcessHistory(n); setInventory(newInv);
-    guardarLocal({ processHistory: n, inventory: newInv });
-    showToast('Proceso revertido y eliminado');
-  };
-
-  const updateSale = (updated) => {
-    const old = sales.find(s => s.id === updated.id);
-    if(!old) return;
-    const revInv = { ...inventory };
-    if(old.kgSold > 0) {
-      if(old.product.toLowerCase().includes('tostado')) revInv.tostado = round2(revInv.tostado + (old.kgSold * old.quantity));
-      else if(old.product.toLowerCase().includes('azul')) revInv.azul = round2(revInv.azul + (old.kgSold * old.quantity));
-    }
-    const revSup = { ...supplies };
-    if(old.bagType === 'kraft') revSup.bolsas_kraft += old.quantity;
-    if(old.bagType === 'granel') revSup.bolsas_granel += old.quantity;
-    revSup.etiquetas += old.quantity;
-    if(old.stickerType === 'grande') revSup.stickers_grandes += old.quantity;
-    if(old.stickerType === 'pequeño') revSup.stickers_pequenos += old.quantity;
-
-    if(updated.kgSold > 0) {
-      if(updated.product.toLowerCase().includes('tostado')) revInv.tostado = round2(revInv.tostado - (updated.kgSold * updated.quantity));
-      else if(updated.product.toLowerCase().includes('azul')) revInv.azul = round2(revInv.azul - (updated.kgSold * updated.quantity));
-    }
-    if(updated.bagType === 'kraft') revSup.bolsas_kraft -= updated.quantity;
-    if(updated.bagType === 'granel') revSup.bolsas_granel -= updated.quantity;
-    revSup.etiquetas -= updated.quantity;
-    if(updated.stickerType === 'grande') revSup.stickers_grandes -= updated.quantity;
-    if(updated.stickerType === 'pequeño') revSup.stickers_pequenos -= updated.quantity;
-
-    const newSales = sales.map(s => s.id === updated.id ? updated : s);
-    setSales(newSales); setInventory(revInv); setSupplies(revSup);
-    guardarLocal({ sales: newSales, inventory: revInv, supplies: revSup });
-    setEditingSale(null);
-    showToast('Venta actualizada');
-  };
-
-  const updateLog = (updated) => {
-    const old = processHistory.find(l => l.id === updated.id);
-    if(!old) return;
-    const revInv = { ...inventory };
-    if (old.type === 'trilla') {
-      revInv.pergamino = round2(revInv.pergamino + old.input);
-      revInv.azul = round2(Math.max(0, revInv.azul - old.output));
-    } else {
-      revInv.azul = round2(revInv.azul + old.input);
-      revInv.tostado = round2(Math.max(0, revInv.tostado - old.output));
-    }
-    if (updated.type === 'trilla') {
-      revInv.pergamino = round2(revInv.pergamino - updated.input);
-      revInv.azul = round2(revInv.azul + updated.output);
-    } else {
-      revInv.azul = round2(revInv.azul - updated.input);
-      revInv.tostado = round2(revInv.tostado + updated.output);
-    }
-    const newHistory = processHistory.map(l => l.id === updated.id ? updated : l);
-    setProcessHistory(newHistory); setInventory(revInv);
-    guardarLocal({ processHistory: newHistory, inventory: revInv });
-    setEditingLog(null);
-    showToast('Lote actualizado');
-  };
-
-  const renderVentas = () => {
-    const usdDisplay = vAmountUSD ? (parseFloat(vAmountUSD) / rates.usd_cop).toFixed(2) : '0.00';
-    const bsDisplay  = vAmountUSD ? (parseFloat(vAmountUSD) * rates.cop_bs).toFixed(2)  : '0.00';
-
-    const handleQuickProduct = (p) => {
-      setVProduct(p.name);
-      setVQuantity(1);
-      setVAmountUSD(p.price.toString());
-      setVSelectedKg(p.deductKg);
-    };
-
-    const handleSell = (e) => {
-      e.preventDefault();
-      if (!vClient || !vProduct || !vAmountUSD) return;
-      const isCredit  = vMethod === 'Crédito';
-      const copAmount = parseFloat(vAmountUSD);
-      const usdAmount = copAmount / rates.usd_cop;
-      const bsAmount  = copAmount * rates.cop_bs;
-      
-      const catItem   = catalog.find(p => p.name === vProduct);
-      
-      const newSale   = {
-        id: Date.now(), 
-        invoiceNum: invoiceCounter.toString().padStart(4, '0'),
-        clientName: vClient, product: vProduct,
-        quantity: parseInt(vQuantity) || 1, kgSold: vSelectedKg,
-        cop: copAmount, usd: usdAmount, bs: bsAmount,
-        method: vMethod, date: formatDate(vDate), isoDate: vDate,
-        time: new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'}),
-        isPaid: !isCredit, paidAmount: isCredit ? 0 : copAmount,
-      };
-
-      // Descontar Inventario de Café
-      const newInv  = { ...inventory, tostado: round2(Math.max(0, inventory.tostado - (vSelectedKg * (parseInt(vQuantity) || 1)))) };
-      
-      // Descontar Insumos (Bolsas)
-      const newSupplies = { ...supplies };
-      if (catItem && catItem.bagType) {
-        newSupplies[catItem.bagType] = Math.max(0, newSupplies[catItem.bagType] - (parseInt(vQuantity) || 1));
-        
-        // Descuento de etiquetas
-        if (catItem.bagType === 'bolsas_kraft') {
-          newSupplies.etiquetas = Math.max(0, newSupplies.etiquetas - (parseInt(vQuantity) || 1));
-        }
-
-        if (vStickerType === 'grande') newSupplies.stickers_grandes = Math.max(0, newSupplies.stickers_grandes - (parseInt(vQuantity) || 1));
-        else if (vStickerType === 'pequeño') newSupplies.stickers_pequenos = Math.max(0, newSupplies.stickers_pequenos - (parseInt(vQuantity) || 1));
-
-        if (newSupplies[catItem.bagType] <= supplies.alerta_umbral || newSupplies.etiquetas <= supplies.alerta_umbral) {
-          showToast(`⚠️ ¡Quedan pocas ${catItem.bagType.replace('_',' ')} o Etiquetas!`);
-        }
-      }
-
-      const newSales = [newSale, ...sales];
-      const nextInvoice = invoiceCounter + 1;
-      
-      let nOrders  = orders;
-      if (activeOrderId) {
-        nOrders = orders.filter(o => o.id !== activeOrderId);
-        setOrders(nOrders); setActiveOrderId(null);
-      }
-
-      setSales(newSales); 
-      setInventory(newInv);
-      setSupplies(newSupplies);
-      setInvoiceCounter(nextInvoice);
-
-      guardarLocal({ 
-        sales: newSales, 
-        inventory: newInv, 
-        supplies: newSupplies, 
-        invoiceCounter: nextInvoice,
-        orders: nOrders 
-      });
-
-      setVClient(''); setVProduct(''); setVQuantity(1); setVAmountUSD(''); setVSelectedKg(0);
-      showToast('✅ Venta registrada con éxito');
-    };
-
-    const handleCreateOrder = (e) => {
-      e.preventDefault();
-      if (!vClient || !vProduct) return;
-      const newOrder = {
-        id: Date.now(), clientName: vClient, product: vProduct,
-        quantity: parseInt(vQuantity) || 1, date: formatDate(orderDate),
-        isoDate: orderDate, status: 'pending', isRecurring: oIsRecurring
-      };
-      const nOrders = [newOrder, ...orders];
-      setOrders(nOrders); guardarLocal({ orders: nOrders });
-      setVClient(''); setVProduct(''); setVQuantity(1); setVAmountUSD(''); setVSelectedKg(0); setOIsRecurring(false);
-      showToast('¡Pedido agendado!'); setVTab('pedidos');
-    };
-
-    const dispatchOrder = (order) => {
-      setVClient(order.clientName); setVProduct(order.product); setVQuantity(order.quantity);
-      const catItem = catalog.find(p => p.name === order.product);
-      if (catItem) { setVAmountUSD((catItem.price * order.quantity).toFixed(2)); setVSelectedKg(catItem.deductKg * order.quantity); }
-      setActiveOrderId(order.id); setVTab('venta');
-    };
-    const deleteOrder = (id) => {
-      const n = orders.filter(o => o.id !== id);
-      setOrders(n); guardarLocal({ orders: n }); showToast('Pedido eliminado');
-    };
-
-    return (
-      <div className="p-4 space-y-4 animate-in fade-in duration-300">
-        {/* SUB-TABS */}
-        <div className="flex bg-zinc-900 p-1 rounded-xl border border-zinc-800">
-          <button onClick={() => setVTab('venta')} className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all ${vTab==='venta' ? 'bg-yellow-400 text-zinc-900 shadow-sm' : 'text-zinc-500 hover:text-zinc-300'}`}>
-            <DollarSign size={14} className="inline mr-1"/>DESPACHO
-          </button>
-          <button onClick={() => setVTab('pedidos')} className={`flex-1 py-2 text-xs font-bold rounded-lg relative transition-all ${vTab==='pedidos' ? 'bg-zinc-800 text-yellow-400' : 'text-zinc-500 hover:text-zinc-300'}`}>
-            <ClipboardList size={14} className="inline mr-1"/>PEDIDOS
-            {orders.length > 0 && <span className="absolute top-1 right-2 w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse border border-zinc-900"/>}
-          </button>
-        </div>
-
-        {vTab === 'venta' ? (
-          <>
-            {/* TASAS */}
-            <div className="flex gap-2">
-              <div className="flex-1 bg-zinc-900 p-2 rounded-xl border border-zinc-800 text-center">
-                <p className="text-[9px] font-bold text-zinc-500 mb-1">TRM (USD/COP)</p>
-                <input type="number" value={rates.usd_cop} onChange={(e)=>{const v=parseFloat(e.target.value)||0; const r={...rates,usd_cop:v}; setRates(r); guardarLocal({rates:r});}} className="w-full font-black text-lg text-yellow-400 bg-transparent outline-none text-center" step="10"/>
-              </div>
-              <div className="flex-1 bg-zinc-900 p-2 rounded-xl border border-zinc-800 text-center">
-                <p className="text-[9px] font-bold text-zinc-500 mb-1">Tasa (COP/BS)</p>
-                <input type="number" value={rates.cop_bs} onChange={(e)=>{const v=parseFloat(e.target.value)||0; const r={...rates,cop_bs:v}; setRates(r); guardarLocal({rates:r});}} className="w-full font-black text-lg text-yellow-400 bg-transparent outline-none text-center" step="0.001"/>
-              </div>
-            </div>
-            {/* CATÁLOGO */}
-            <div>
-              <p className="text-xs font-bold text-zinc-400 mb-2">CATÁLOGO RÁPIDO</p>
-              <div className="grid grid-cols-2 gap-2">
-                {catalog.map(p=>(
-                  <button key={p.id} type="button" onClick={()=>handleQuickProduct(p)} className="bg-zinc-900 border border-zinc-800 hover:border-yellow-400 text-zinc-300 text-[10px] font-bold py-2 px-2 rounded-lg flex justify-between items-center">
-                    <span className="truncate mr-1">{p.name}</span><span className="bg-yellow-400 text-zinc-900 px-1 rounded font-black">${p.price}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-            {/* BANNER PEDIDO ACTIVO */}
-            {activeOrderId && (
-              <div className="bg-yellow-400/20 border border-yellow-400/50 p-3 rounded-xl flex justify-between items-center">
-                <span className="text-xs font-bold text-yellow-400 flex items-center gap-2"><CheckSquare size={16}/>Cumpliendo Pedido Agendado</span>
-                <button onClick={()=>{setActiveOrderId(null);setVClient('');setVProduct('');setVQuantity(1);setVAmountUSD('');}} className="text-[10px] text-zinc-400 hover:text-white underline font-bold">CANCELAR</button>
-              </div>
-            )}
-            {/* FORMULARIO VENTA */}
-            <div className="bg-zinc-900 border border-zinc-800 p-4 rounded-xl shadow-lg">
-              <form onSubmit={handleSell} className="space-y-4">
-                <div className="grid grid-cols-2 gap-3">
-                  <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Fecha</label><input type="date" value={vDate} onChange={e=>setVDate(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 text-sm font-bold" required/></div>
-                  <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Cliente</label>
-                    <input list="clients-list" value={vClient} onChange={e=>setVClient(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 text-sm" placeholder="Escribir o buscar..." required />
-                    <datalist id="clients-list">
-                      {clients.slice().sort((a,b)=>a.fullName.localeCompare(b.fullName)).map(c=><option key={c.id} value={c.fullName} />)}
-                      <option value="Cliente Ocasional" />
-                    </datalist>
-                  </div>
-                </div>
-                <div className="grid grid-cols-12 gap-3">
-                  <div className="col-span-8"><label className="text-[10px] text-zinc-400 font-bold uppercase">Producto</label><input type="text" value={vProduct} onChange={e=>setVProduct(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 text-sm" required placeholder="Ej. 1Kg Granel"/></div>
-                  <div className="col-span-4"><label className="text-[10px] text-zinc-400 font-bold uppercase">Cant.</label>
-                    <input type="number" min="1" value={vQuantity} onChange={e=>{const q=parseInt(e.target.value)||1; setVQuantity(q); const c=catalog.find(p=>p.name===vProduct); if(c){setVAmountUSD((c.price*q).toFixed(2));setVSelectedKg(c.deductKg*q);}}} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white font-bold mt-1 text-sm text-center" required/>
-                  </div>
-                </div>
-                <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Monto (COP)</label><input type="number" step="50" value={vAmountUSD} onChange={e=>setVAmountUSD(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-yellow-400 font-black mt-1 text-lg" required placeholder="0"/></div>
-                <div className="flex gap-2">
-                  <div className="flex-1 bg-zinc-950 p-2 rounded-lg text-center border border-zinc-800"><span className="text-[10px] text-zinc-500 block">USD</span><span className="text-white text-xs font-bold">{usdDisplay}</span></div>
-                  <div className="flex-1 bg-zinc-950 p-2 rounded-lg text-center border border-zinc-800"><span className="text-[10px] text-zinc-500 block">BS</span><span className="text-white text-xs font-bold">{bsDisplay}</span></div>
-                </div>
-                <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Forma de Pago</label>
-                  <select value={vMethod} onChange={e=>setVMethod(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 font-bold text-sm">
-                    {paymentMethods.map(m=><option key={m} value={m}>{m}</option>)}
-                    <option value="Crédito">A CRÉDITO (FIADO)</option>
-                  </select>
-                </div>
-
-                {/* SELECCIÓN DE STICKER */}
-                <div className="space-y-2">
-                  <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">Tipo de Sticker</p>
-                  <div className="flex gap-2">
-                    <button type="button" onClick={()=>setVStickerType('grande')} className={`flex-1 py-2 text-[10px] font-bold rounded-lg border transition-all ${vStickerType==='grande'?'bg-yellow-400 text-zinc-900 border-yellow-400 shadow-lg shadow-yellow-400/20':'border-zinc-800 text-zinc-500 hover:border-zinc-600'}`}>STICKER G</button>
-                    <button type="button" onClick={()=>setVStickerType('pequeño')} className={`flex-1 py-2 text-[10px] font-bold rounded-lg border transition-all ${vStickerType==='pequeño'?'bg-yellow-400 text-zinc-900 border-yellow-400 shadow-lg shadow-yellow-400/20':'border-zinc-800 text-zinc-500 hover:border-zinc-600'}`}>STICKER P</button>
-                  </div>
-                </div>
-
-                <button type="submit" className="w-full bg-yellow-400 text-zinc-900 font-black py-4 rounded-lg flex justify-center items-center gap-2 hover:bg-yellow-300 transition-colors shadow-lg">
-                  <Plus size={18}/>REGISTRAR VENTA
-                </button>
-              </form>
-            </div>
-          </>
-        ) : (
-          <>
-            {/* FORMULARIO PEDIDO */}
-            <div className="bg-zinc-900 border border-zinc-800 p-4 rounded-xl shadow-lg">
-              <h3 className="text-xs font-bold text-yellow-400 mb-3 uppercase tracking-wider flex items-center gap-2"><ClipboardList size={14}/>Nuevo Pedido</h3>
-              <form onSubmit={handleCreateOrder} className="space-y-4">
-                <div className="grid grid-cols-2 gap-3">
-                  <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Para el (Fecha)</label><input type="date" value={orderDate} onChange={e=>setOrderDate(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 text-sm font-bold" required/></div>
-                  <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Cliente</label>
-                    <input list="clients-list-orders" value={vClient} onChange={e=>setVClient(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 text-sm" placeholder="Escribir o buscar..." required />
-                    <datalist id="clients-list-orders">
-                      {clients.slice().sort((a,b)=>a.fullName.localeCompare(b.fullName)).map(c=><option key={c.id} value={c.fullName} />)}
-                      <option value="Cliente Ocasional" />
-                    </datalist>
-                  </div>
-                </div>
-                <div className="grid grid-cols-12 gap-3">
-                  <div className="col-span-8"><label className="text-[10px] text-zinc-400 font-bold uppercase">Producto (Solo Empacado)</label>
-                    <select value={vProduct} onChange={e=>setVProduct(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 text-sm" required>
-                      <option value="">Tipo de café...</option>
-                      {catalog.filter(c=>c.bagType === 'bolsas_kraft').map(c=><option key={c.id} value={c.name}>{c.name}</option>)}
-                    </select>
-                  </div>
-                  <div className="col-span-4"><label className="text-[10px] text-zinc-400 font-bold uppercase">Cant.</label><input type="number" min="1" value={vQuantity} onChange={e=>setVQuantity(parseInt(e.target.value)||1)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white font-bold mt-1 text-sm text-center" required/></div>
-                </div>
-                <div className="flex items-center gap-2 mt-2">
-                  <input type="checkbox" id="recurring" checked={oIsRecurring} onChange={(e) => setOIsRecurring(e.target.checked)} className="w-4 h-4 text-yellow-400 bg-zinc-950 border-zinc-800 rounded focus:ring-yellow-400 focus:ring-2" />
-                  <label htmlFor="recurring" className="text-xs font-bold text-zinc-300">Entregar Semanalmente</label>
-                </div>
-                <button type="submit" className="w-full bg-zinc-800 border border-yellow-400 text-yellow-400 font-black py-3 rounded-lg flex justify-center items-center gap-2 hover:bg-zinc-700 transition-colors">
-                  <Save size={18}/>GUARDAR PEDIDO
-                </button>
-              </form>
-            </div>
-            {/* LISTA PEDIDOS */}
-            {orders.length > 0 && (
-              <div>
-                <h3 className="text-xs font-bold text-yellow-400 mb-2 uppercase tracking-wider flex items-center gap-2 mt-4"><Bell size={14}/>Agenda Activa ({orders.length})</h3>
-                <div className="grid grid-cols-2 gap-2 mb-3">
-                  <div className="bg-zinc-900/50 p-2 rounded-lg border border-zinc-800 text-center">
-                    <p className="text-[8px] text-zinc-500 uppercase font-bold">Kilos x Procesar</p>
-                    <p className="text-sm font-black text-white">{round2(orders.reduce((acc, o) => {
-                      const c = catalog.find(cat => cat.name === o.product);
-                      return acc + (c ? c.deductKg * o.quantity : 0);
-                    }, 0))} kg</p>
-                  </div>
-                  <div className="bg-zinc-900/50 p-2 rounded-lg border border-zinc-800 text-center">
-                    <p className="text-[8px] text-zinc-500 uppercase font-bold">Total Paquetes</p>
-                    <p className="text-sm font-black text-yellow-400">{orders.reduce((acc, o) => acc + o.quantity, 0)} uds</p>
-                  </div>
-                </div>
-                <div className="space-y-3">
-                  {orders.map(o=>(
-                    <div key={o.id} className="bg-zinc-950 p-3 rounded-xl border-l-4 border-l-yellow-400 border-y border-r border-zinc-800 shadow-md">
-                      <div className="flex justify-between items-start mb-2">
-                        <div><p className="font-bold text-white text-sm flex items-center gap-2">{o.clientName} {o.isRecurring && <span className="bg-yellow-400 text-zinc-900 text-[8px] px-1 rounded uppercase">Semanal</span>}</p><p className="text-[10px] text-zinc-400">Para: <span className="text-yellow-400 font-bold">{o.date}</span></p></div>
-                        <button onClick={()=>deleteOrder(o.id)} className="text-zinc-600 hover:text-red-500"><Trash2 size={14}/></button>
-                      </div>
-                      <div className="flex justify-between items-end border-t border-zinc-800 pt-2 mt-2">
-                        <p className="font-black text-zinc-300 text-sm">{o.quantity}x {o.product}</p>
-                        <button onClick={()=>{
-                          dispatchOrder(o);
-                          if (o.isRecurring) {
-                            // Crear el próximo pedido para la siguiente semana
-                            const nextDate = new Date(o.isoDate);
-                            nextDate.setDate(nextDate.getDate() + 7);
-                            const nextDateStr = nextDate.toISOString().split('T')[0];
-                            const newOrder = { ...o, id: Date.now(), date: formatDate(nextDateStr), isoDate: nextDateStr };
-                            const nOrders = [newOrder, ...orders.filter(ord=>ord.id!==o.id)];
-                            setOrders(nOrders); guardarLocal({ orders: nOrders });
-                            showToast('Siguiente pedido semanal programado');
-                          }
-                        }} className="text-[10px] bg-yellow-400 text-zinc-900 px-3 py-1.5 rounded font-black hover:bg-yellow-300">¡DESPACHAR!</button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </>
-        )}
-      </div>
-    );
-  };
-
-  // ============================================================
-  //  RENDER: COMPRAS (MATERIA PRIMA + OPEX)
-  // ============================================================
-  const renderCompras = () => {
-    const totalCOP = (cKg && cPriceCOP) ? (parseFloat(cKg) * parseFloat(cPriceCOP)).toFixed(0) : 0;
-
-    const handleBuyMP = (e) => {
-      e.preventDefault();
-      if (!cKg || !cPriceCOP || !cProducer) return;
-      const isCredit     = cMethod === 'Crédito';
-      const copTotal     = parseFloat(totalCOP);
-      const usdCalc      = copTotal / rates.usd_cop;
-      const newPurchase  = {
-        id: Date.now(), type: 'Materia Prima', coffeeType: cProdType,
-        producer: cProducer, kg: parseFloat(cKg),
-        pricePerKgCop: parseFloat(cPriceCOP), cop: copTotal,
-        usd: usdCalc, method: cMethod, isPaid: !isCredit,
-        paidAmount: isCredit ? 0 : copTotal,
-        date: formatDate(cDate), isoDate: cDate,
-      };
-      const newInv = { ...inventory };
-      if (cProdType === 'Pergamino') newInv.pergamino = round2(newInv.pergamino + parseFloat(cKg));
-      if (cProdType === 'Azul')      newInv.azul      = round2(newInv.azul + parseFloat(cKg));
-      const newPurchases = [newPurchase, ...purchases];
-      setPurchases(newPurchases); setInventory(newInv);
-      guardarLocal({ purchases: newPurchases, inventory: newInv });
-      setCKg(''); setCPriceCOP(''); setCProducer('');
-      showToast('✅ Materia prima registrada');
-    };
-
-    const handleBuyOpex = (e) => {
-      e.preventDefault();
-      if (!oAmount) return;
-      let copCalc = parseFloat(oAmount);
-      if (oCurrency === 'USD') copCalc = parseFloat(oAmount) * rates.usd_cop;
-      if (oCurrency === 'BS')  copCalc = parseFloat(oAmount) / rates.cop_bs;
-      const newExp = {
-        id: Date.now(), category: oCategory, description: oDesc,
-        cop: copCalc, usd: copCalc / rates.usd_cop, originalAmount: parseFloat(oAmount),
-        originalCurrency: oCurrency, method: oMethod,
-        date: formatDate(oDate), isoDate: oDate,
-      };
-      const newExpenses = [newExp, ...expenses];
-      setExpenses(newExpenses); guardarLocal({ expenses: newExpenses });
-      setOAmount(''); setODesc('');
-      showToast('✅ Gasto operativo registrado');
-    };
-
-    return (
-      <div className="p-4 space-y-4 animate-in fade-in duration-300">
-        <div className="flex bg-zinc-900 p-1 rounded-xl border border-zinc-800">
-          <button onClick={()=>setCTab('materia_prima')} className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all ${cTab==='materia_prima'?'bg-zinc-800 text-yellow-400':'text-zinc-500'}`}><Package size={14} className="inline mr-1"/>MATERIA PRIMA</button>
-          <button onClick={()=>setCTab('opex')} className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all ${cTab==='opex'?'bg-red-900/30 text-red-400':'text-zinc-500'}`}><MinusCircle size={14} className="inline mr-1"/>GASTOS (OPEX)</button>
-        </div>
-
-        {cTab === 'materia_prima' ? (
-          <div className="bg-zinc-900 border border-zinc-800 p-4 rounded-xl shadow-lg">
-            <form onSubmit={handleBuyMP} className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Fecha</label><input type="date" value={cDate} onChange={e=>setCDate(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 text-sm font-bold" required/></div>
-                <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Tipo de Café</label>
-                  <select value={cProdType} onChange={e=>setCProdType(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 font-bold text-sm">
-                    <option value="Pergamino">Pergamino</option>
-                    <option value="Azul">Azul (Lavado)</option>
-                  </select>
-                </div>
-              </div>
-              <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Productor / Finca</label>
-                <input list="producers-list" value={cProducer} onChange={e=>setCProducer(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 text-sm" placeholder="Escribir o buscar productor..." required />
-                <datalist id="producers-list">
-                  {producers.slice().sort((a,b)=>{const nA=typeof a==='string'?a:a.name; const nB=typeof b==='string'?b:b.name; return nA.localeCompare(nB);}).map(p=>{const n=typeof p==='string'?p:p.name; const f=typeof p==='string'?'':p.finca; return <option key={typeof p==='string'?p:p.id} value={n}>{f?`${n} (${f})`:n}</option>;})}
-                </datalist>
-              </div>
-              <div className="grid grid-cols-2 gap-3 p-3 bg-zinc-950 rounded-lg border border-yellow-400/30">
-                <div><label className="text-[10px] text-yellow-400 font-bold uppercase">Kilos (KG)</label><input type="number" step="0.01" value={cKg} onChange={e=>setCKg(e.target.value)} className="w-full p-3 bg-zinc-900 border border-zinc-700 rounded-lg text-white font-black mt-1" required placeholder="0.00"/></div>
-                <div><label className="text-[10px] text-yellow-400 font-bold uppercase">Precio x KG (COP)</label><input type="number" step="100" value={cPriceCOP} onChange={e=>setCPriceCOP(e.target.value)} className="w-full p-3 bg-zinc-900 border border-zinc-700 rounded-lg text-white font-black mt-1" required placeholder="0"/></div>
-              </div>
-              <div className="bg-yellow-400/10 p-3 rounded-lg border border-yellow-400/20 text-center">
-                <p className="text-[10px] text-zinc-400 font-bold uppercase">Monto Total</p>
-                <p className="text-2xl font-black text-yellow-400">${Number(totalCOP).toLocaleString('es-CO')} COP</p>
-              </div>
-              <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Método de Pago</label>
-                <select value={cMethod} onChange={e=>setCMethod(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 font-bold text-sm">
-                  {paymentMethods.map(m=><option key={m} value={m}>{m}</option>)}
-                  <option value="Crédito">A CRÉDITO</option>
-                </select>
-              </div>
-              <button type="submit" className="w-full font-black py-4 rounded-lg flex justify-center items-center gap-2 bg-yellow-400 text-zinc-900 hover:bg-yellow-300 shadow-lg"><ShoppingCart size={18}/>REGISTRAR COMPRA</button>
-            </form>
-          </div>
-        ) : (
-          <div className="bg-red-950/20 border border-red-900/30 p-4 rounded-xl shadow-lg">
-            <form onSubmit={handleBuyOpex} className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <div><label className="text-[10px] text-red-400 font-bold uppercase">Fecha</label><input type="date" value={oDate} onChange={e=>setODate(e.target.value)} className="w-full p-3 bg-zinc-950 border border-red-900/50 rounded-lg text-white mt-1 text-sm font-bold" required/></div>
-                <div><label className="text-[10px] text-red-400 font-bold uppercase">Categoría</label>
-                  <select value={oCategory} onChange={e=>setOCategory(e.target.value)} className="w-full p-3 bg-zinc-950 border border-red-900/50 rounded-lg text-white mt-1 text-sm font-bold">
-                    {expenseCategories.map(c=><option key={c} value={c}>{c}</option>)}
-                  </select>
-                </div>
-              </div>
-              <div><label className="text-[10px] text-red-400 font-bold uppercase">Detalle</label><input type="text" value={oDesc} onChange={e=>setODesc(e.target.value)} className="w-full p-3 bg-zinc-950 border border-red-900/50 rounded-lg text-white mt-1 text-sm" placeholder="Ej. 100 Bolsas Kraft" required/></div>
-              <div className="grid grid-cols-2 gap-3">
-                <div><label className="text-[10px] text-red-400 font-bold uppercase">Moneda</label>
-                  <select value={oCurrency} onChange={e=>setOCurrency(e.target.value)} className="w-full p-3 bg-zinc-950 border border-red-900/50 rounded-lg text-white mt-1 font-black text-sm">
-                    <option value="COP">Pesos (COP)</option><option value="USD">Dólares (USD)</option><option value="BS">Bolívares (BS)</option>
-                  </select>
-                </div>
-                <div><label className="text-[10px] text-red-400 font-bold uppercase">Monto</label><input type="number" step="0.01" value={oAmount} onChange={e=>setOAmount(e.target.value)} className="w-full p-3 bg-zinc-950 border border-red-900/50 rounded-lg text-red-400 font-black mt-1 text-lg" required placeholder="0.00"/></div>
-              </div>
-              <div><label className="text-[10px] text-red-400 font-bold uppercase">Pago con</label>
-                <select value={oMethod} onChange={e=>setOMethod(e.target.value)} className="w-full p-3 bg-zinc-950 border border-red-900/50 rounded-lg text-white mt-1 font-bold text-sm">
-                  {paymentMethods.map(m=><option key={m} value={m}>{m}</option>)}
-                </select>
-              </div>
-              <button type="submit" className="w-full font-black py-4 rounded-lg flex justify-center items-center gap-2 bg-red-600 text-white hover:bg-red-500 shadow-lg shadow-red-900/50"><MinusCircle size={18}/>REGISTRAR GASTO</button>
-            </form>
-          </div>
-        )}
-
-        {/* HISTORIAL COMPRAS MP */}
-        {cTab === 'materia_prima' && purchases.length > 0 && (
-          <div>
-            <button onClick={()=>setShowBuyHistory(v=>!v)} className="w-full flex justify-between items-center text-xs font-bold text-zinc-400 py-2 border border-dashed border-zinc-800 rounded-lg px-3 hover:border-yellow-400/30 hover:text-yellow-400 transition-colors">
-              <span><List size={12} className="inline mr-1"/>HISTORIAL COMPRAS ({purchases.length})</span>
-              <span>{showBuyHistory?'▲':'▼'}</span>
-            </button>
-            {showBuyHistory && (
-              <div className="space-y-2 mt-2">
-                {purchases.slice(0,20).map(p=>(
-                  <div key={p.id} className="bg-zinc-900 p-3 rounded-xl border border-zinc-800 flex justify-between items-center">
-                    <div>
-                      <p className="font-bold text-zinc-200 text-xs">{p.kg}kg {p.coffeeType} — {p.producer}</p>
-                      <p className="text-[9px] text-zinc-500">{p.date} • {p.method} • <span className={p.isPaid?'text-green-400':'text-orange-400'}>{p.isPaid?'Pagado':'Crédito'}</span></p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="font-black text-sm text-red-400">-${(p.cop||0).toLocaleString('es-CO')} COP</span>
-                      <button onClick={()=>deletePurchase(p.id)} className="text-zinc-700 hover:text-red-500"><Trash2 size={13}/></button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* HISTORIAL GASTOS OPEX */}
-        {cTab === 'opex' && expenses.length > 0 && (
-          <div>
-            <button onClick={()=>setShowOpexHistory(v=>!v)} className="w-full flex justify-between items-center text-xs font-bold text-zinc-400 py-2 border border-dashed border-red-900/30 rounded-lg px-3 hover:text-red-400 transition-colors">
-              <span><List size={12} className="inline mr-1"/>HISTORIAL GASTOS ({expenses.length})</span>
-              <span>{showOpexHistory?'▲':'▼'}</span>
-            </button>
-            {showOpexHistory && (
-              <div className="space-y-2 mt-2">
-                {expenses.slice(0,20).map(e=>(
-                  <div key={e.id} className="bg-zinc-900 p-3 rounded-xl border border-zinc-800 flex justify-between items-center">
-                    <div>
-                      <p className="font-bold text-zinc-200 text-xs">{e.category} — {e.description}</p>
-                      <p className="text-[9px] text-zinc-500">{e.date} • {e.originalAmount} {e.originalCurrency}</p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="font-black text-sm text-red-400">-${(e.cop||0).toLocaleString('es-CO')} COP</span>
-                      <button onClick={()=>deleteExpense(e.id)} className="text-zinc-700 hover:text-red-500"><Trash2 size={13}/></button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  // ============================================================
-  //  RENDER: FÁBRICA (TRILLA + TUESTE)
-  // ============================================================
-  const renderFabrica = () => {
-    const currentMerma = (fKgIn && fKgOut && parseFloat(fKgIn) > 0)
-      ? (((parseFloat(fKgIn) - parseFloat(fKgOut)) / parseFloat(fKgIn)) * 100).toFixed(1)
-      : '0.0';
-
-    const getProducerStock = (prodName, actionType) => {
-      let stock = 0;
-      const coffeeType = actionType === 'trilla' ? 'Pergamino' : 'Azul';
-      purchases.forEach(p => { if (p.producer === prodName && p.coffeeType === coffeeType) stock += p.kg; });
-      processHistory.forEach(log => {
-        if (log.producer === prodName) {
-           if (coffeeType === 'Pergamino' && log.type === 'trilla') stock -= log.input;
-           if (coffeeType === 'Azul' && log.type === 'trilla') stock += log.output;
-           if (coffeeType === 'Azul' && log.type === 'tueste') stock -= log.input;
-        }
-      });
-      return round2(Math.max(0, stock));
-    };
-
-    const filteredProducers = producers.map(p => {
-      const name = typeof p === 'string' ? p : p.name;
-      return { name, stock: getProducerStock(name, fAction) };
-    }).filter(p => p.stock > 0);
-
-    const handleProcess = (e) => {
-      e.preventDefault();
-      const input = parseFloat(fKgIn); const output = parseFloat(fKgOut);
-      if (input <= 0 || output <= 0 || output > input) { showToast('⚠️ Pesos inválidos'); return; }
-      const newInv = { ...inventory };
-      if (fAction === 'trilla') {
-        if (input > newInv.pergamino) { showToast('⚠️ Stock insuficiente'); return; }
-        newInv.pergamino = round2(newInv.pergamino - input); 
-        newInv.azul = round2(newInv.azul + output);
-      } else {
-        if (input > newInv.azul) { showToast('⚠️ Stock insuficiente'); return; }
-        newInv.azul = round2(newInv.azul - input); 
-        newInv.tostado = round2(newInv.tostado + output);
-      }
-      let costPerKg = 0;
-      const lastPurchase = purchases.find(p => p.coffeeType === (fAction === 'trilla' ? 'Pergamino' : 'Azul'));
-      if (lastPurchase) costPerKg = lastPurchase.pricePerKgCop;
-      
-      const cat1kg = catalog.find(c => c.deductKg === 1) || { price: 40000 };
-      const estimatedRevenue = output * cat1kg.price;
-      const totalCost = input * costPerKg;
-      const estimatedProfit = estimatedRevenue - totalCost;
-
-      const prodName = typeof producerInput === 'string' ? producerInput : producerInput.name;
-      const log = { id: Date.now(), type: fAction, producer: prodName || 'N/A', input, output, merma: currentMerma, date: formatDate(fDate), estimatedProfit };
-      const newHistory = [log, ...processHistory];
-      setProcessHistory(newHistory); setInventory(newInv);
-      guardarLocal({ inventory: newInv, processHistory: newHistory });
-      setFKgIn(''); setFKgOut(''); setProducerInput('');
-      showToast('✅ Lote procesado');
-    };
-
-    const handleSaveProcess = () => {
-      const input = parseFloat(fKgIn);
-      if (isNaN(input) || input <= 0) { showToast('⚠️ Ingrese el Peso Bruto'); return; }
-      const prodName = typeof producerInput === 'string' ? producerInput : producerInput.name;
-      if (!prodName) { showToast('⚠️ Seleccione Productor'); return; }
-
-      const newInv = { ...inventory };
-      if (fAction === 'trilla') {
-        if (input > newInv.pergamino) { showToast('⚠️ Stock insuficiente'); return; }
-        newInv.pergamino = round2(newInv.pergamino - input); 
-      } else {
-        if (input > newInv.azul) { showToast('⚠️ Stock insuficiente'); return; }
-        newInv.azul = round2(newInv.azul - input); 
-      }
-
-      const active = { id: Date.now(), type: fAction, producer: prodName, input, date: formatDate(fDate) };
-      const newActive = [active, ...activeProcesses];
-      setActiveProcesses(newActive);
-      setInventory(newInv);
-      guardarLocal({ activeProcesses: newActive, inventory: newInv });
-      setFKgIn(''); setProducerInput('');
-      showToast('⏳ Lote en curso guardado');
-    };
-
-    return (
-      <div className="p-4 space-y-4 animate-in fade-in duration-300">
-        {/* STOCK CARDS */}
-        <div className="grid grid-cols-3 gap-2">
-          <div className="bg-zinc-900 border border-zinc-800 p-3 rounded-xl text-center shadow-lg">
-            <p className="text-[8px] font-bold text-zinc-500 uppercase tracking-widest">Pergamino</p>
-            <p className="text-xl font-black text-zinc-300">{inventory.pergamino.toFixed(1)}<span className="text-[10px]">kg</span></p>
-          </div>
-          <div className="bg-zinc-900 border border-zinc-800 p-3 rounded-xl text-center shadow-lg">
-            <p className="text-[8px] font-bold text-zinc-500 uppercase tracking-widest">Azul</p>
-            <p className="text-xl font-black text-blue-400">{inventory.azul.toFixed(1)}<span className="text-[10px]">kg</span></p>
-          </div>
-          <div className="bg-yellow-400 p-3 rounded-xl text-center shadow-[0_0_15px_rgba(250,204,21,0.2)]">
-            <p className="text-[8px] font-bold text-zinc-800 uppercase tracking-widest">Tostado</p>
-            <p className="text-2xl font-black text-zinc-900">{inventory.tostado.toFixed(1)}<span className="text-[10px]">kg</span></p>
-          </div>
-        </div>
-
-        {/* TABS TRILLA/TUESTE */}
-        <div className="flex bg-zinc-900 p-1 rounded-xl border border-zinc-800">
-          <button onClick={()=>setFAction('trilla')} className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all ${fAction==='trilla'?'bg-zinc-800 text-white':'text-zinc-500'}`}>1. TRILLAR</button>
-          <button onClick={()=>setFAction('tueste')} className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all ${fAction==='tueste'?'bg-orange-900/40 text-orange-400':'text-zinc-500'}`}>2. TOSTAR 🔥</button>
-        </div>
-
-        {activeProcesses.length > 0 && (
-          <div className="bg-blue-900/20 border border-blue-500/30 p-4 rounded-xl">
-            <h3 className="text-xs font-bold text-blue-400 mb-3 uppercase flex items-center gap-2"><Clock size={14}/>Lotes en Proceso ({activeProcesses.length})</h3>
-            <div className="space-y-2">
-              {activeProcesses.map(ap => (
-                <div key={ap.id} className="bg-zinc-950 p-3 rounded-lg border border-blue-500/20 flex justify-between items-center">
-                  <div>
-                    <p className="font-bold text-zinc-200 text-xs">{ap.type==='trilla'?'Trilla':'Tueste'} — {ap.producer}</p>
-                    <p className="text-[9px] text-zinc-500">Entrada: {ap.input}kg • {ap.date}</p>
-                  </div>
-                  <button onClick={() => {
-                    setFAction(ap.type);
-                    setProducerInput(ap.producer);
-                    setFKgIn(ap.input);
-                    const newInv = {...inventory};
-                    if (ap.type === 'trilla') newInv.pergamino += ap.input;
-                    else newInv.azul += ap.input;
-                    const newActive = activeProcesses.filter(x => x.id !== ap.id);
-                    setActiveProcesses(newActive); setInventory(newInv);
-                    guardarLocal({ activeProcesses: newActive, inventory: newInv });
-                  }} className="bg-blue-500 hover:bg-blue-400 text-white px-3 py-1.5 rounded text-[10px] font-black transition-colors">CONTINUAR</button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* FORMULARIO */}
-        <div className="bg-zinc-900 border border-zinc-800 p-5 rounded-xl">
-          <form onSubmit={handleProcess} className="space-y-4">
-            <div className="grid grid-cols-2 gap-3">
-              <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Fecha Proceso</label><input type="date" value={fDate} onChange={e=>setFDate(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 text-sm font-bold" required/></div>
-              <div><label className="text-[10px] text-zinc-400 font-bold uppercase">Productor (Con Stock)</label>
-                <select value={producerInput} onChange={e=>setProducerInput(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white mt-1 text-sm" required>
-                  <option value="">Seleccione...</option>
-                  {filteredProducers.map(p=><option key={p.name} value={p.name}>{p.name} ({p.stock.toFixed(1)}kg)</option>)}
-                </select>
-              </div>
-            </div>
-            <div className="flex items-center gap-4">
-              <div className="flex-1"><label className="text-[10px] text-zinc-400 font-bold uppercase">Peso Bruto (kg)</label><input type="number" step="0.01" value={fKgIn} onChange={e=>setFKgIn(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white font-black mt-1 text-center text-lg" required/></div>
-              <ArrowRightLeft size={24} className="text-zinc-600 mt-5"/>
-              <div className="flex-1"><label className="text-[10px] text-zinc-400 font-bold uppercase">Peso Neto (kg)</label><input type="number" step="0.01" value={fKgOut} onChange={e=>setFKgOut(e.target.value)} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-yellow-400 font-black mt-1 text-center text-lg" required/></div>
-            </div>
-            <div className="bg-zinc-950 p-3 rounded-xl border border-zinc-800 flex justify-between items-center">
-              <span className="text-xs text-zinc-500 font-medium">Merma del lote:</span>
-              <span className={`text-xl font-black ${parseFloat(currentMerma)>22?'text-red-500':'text-green-400'}`}>{currentMerma}%</span>
-            </div>
-            <div className="flex gap-2 mt-4">
-              <button type="button" onClick={handleSaveProcess} className="flex-1 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 border border-blue-500/30 font-black py-4 rounded-xl flex justify-center items-center gap-2 text-xs tracking-widest transition-colors">
-                <Clock size={16}/>EN CURSO
-              </button>
-              <button type="submit" className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-white border border-zinc-700 font-black py-4 rounded-xl flex justify-center items-center gap-2 text-xs tracking-widest transition-colors">
-                <Factory size={16}/>FINALIZAR
-              </button>
-            </div>
-          </form>
-        </div>
-
-        {/* HISTORIAL DE PROCESOS */}
-        {processHistory.length > 0 && (
-          <div>
-            <h3 className="text-xs font-bold text-zinc-400 mb-2 uppercase tracking-wider flex items-center gap-2"><List size={12}/>Bitácora de Lotes ({processHistory.length})</h3>
-            <div className="space-y-2">
-              {processHistory.slice(0,10).map(log=>(
-                <div key={log.id} className={`p-3 rounded-xl border flex justify-between items-center ${log.type==='tueste'?'bg-orange-950/20 border-orange-900/30':'bg-zinc-900 border-zinc-800'}`}>
-                  <div>
-                    <p className="font-bold text-zinc-200 text-xs">{log.type==='trilla'?'Trilla':'Tueste 🔥'} — {log.producer}</p>
-                    <p className="text-[9px] text-zinc-500">{log.date} • {log.input}kg → {log.output}kg</p>
-                    {log.estimatedProfit !== undefined && (
-                      <p className={`text-[9px] font-bold mt-1 ${log.estimatedProfit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                        Ganancia Est: ${log.estimatedProfit.toLocaleString('es-CO')}
-                      </p>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className={`font-black text-sm ${parseFloat(log.merma)>22?'text-red-400':'text-green-400'}`}>{log.merma}%</span>
-                    <div className="flex gap-2">
-                      <button onClick={()=>setEditingLog(log)} className="text-zinc-700 hover:text-yellow-400 p-1"><Edit3 size={13}/></button>
-                      <button onClick={()=>deleteLog(log.id)} className="text-zinc-700 hover:text-red-500 p-1"><Trash2 size={13}/></button>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  // ============================================================
-  //  RENDER: BALANCE
-  // ============================================================
-  const renderBalance = () => {
-    // Función formateadora de moneda (COP por defecto, USD con toggle)
-    const fmt = (cop) => showUSD
-      ? `USD ${(cop / rates.usd_cop).toFixed(2)}`
-      : `$${Math.round(cop).toLocaleString('es-CO')}`;
-
-    // ✅ Ingresos: solo ventas pagadas o con abono, excluyendo donaciones
-    const ingresosCOP   = sales
-      .filter(s => s.method !== 'Donación' && (s.isPaid || (s.paidAmount || 0) > 0))
-      .reduce((a, s) => a + (s.paidAmount || s.cop || 0), 0);
-
-    // ✅ Costos operativos y materia prima (en COP)
-    const opexCOP      = expenses.reduce((a, e) => a + (e.cop || 0), 0);
-    const comprasMPCOP = purchases
-      .filter(p => p.isPaid || (p.paidAmount || 0) > 0)
-      .reduce((a, p) => a + (p.paidAmount || p.cop || 0), 0);
-
-    const netPnL = ingresosCOP - opexCOP - comprasMPCOP;
-
-    // ✅ Cuentas por cobrar y por pagar (comparación correcta en COP)
-    const cxCobrar = sales.filter(s => !s.isPaid && (s.cop || 0) > (s.paidAmount || 0));
-    const cxPagar  = purchases.filter(p => !p.isPaid && (p.cop || 0) > (p.paidAmount || 0));
-
-    // ✅ Ticket promedio en COP
-    const ventasReales = sales.filter(s => s.method !== 'Donación');
-    const ticketPromedio = ventasReales.length > 0
-      ? ventasReales.reduce((a, b) => a + (b.cop || 0), 0) / ventasReales.length
-      : 0;
-
-    const donationsCount = sales.filter(s => s.method === 'Donación').length;
-    const kgDonated      = sales.filter(s => s.method === 'Donación').reduce((a, s) => a + (s.kgSold || 0), 0);
-
-    // ✅ Gráfico dinámico
-    let rangeDays = 7;
-    if (chartRange === '30D') rangeDays = 30;
-    
-    let chartData = [];
-    if (chartRange !== '1A') {
-      const dates = Array.from({length:rangeDays}, (_, i) => {
-        const d = new Date(); d.setDate(d.getDate() - i);
-        return formatDate(d.toISOString().split('T')[0]);
-      }).reverse();
-      chartData = dates.map(date => ({
-        label: date.substring(0, 5),
-        total: sales.filter(s => s.date === date).reduce((a, b) => a + (b.cop || 0), 0)
-      }));
-    } else {
-      const months = Array.from({length:12}, (_, i) => {
-        const d = new Date(); d.setMonth(d.getMonth() - i);
-        return { m: d.getMonth()+1, y: d.getFullYear(), name: d.toLocaleString('es', {month:'short'}).substring(0,3).toUpperCase() };
-      }).reverse();
-      chartData = months.map(month => {
-        const total = sales.filter(s => {
-          if (!s.isoDate) return false;
-          const sd = new Date(s.isoDate);
-          return (sd.getMonth()+1) === month.m && sd.getFullYear() === month.y;
-        }).reduce((a,b) => a + (b.cop || 0), 0);
-        return { label: month.name, total };
-      });
-    }
-    const maxChart = Math.max(...chartData.map(d => d.total), 1);
-
-    // ✅ markPaid usa COP (no USD) para evitar mezcla de monedas
-    const markPaid = (item, type) => {
-      const pending = (item.cop || 0) - (item.paidAmount || 0);
-      setPromptModal({ isOpen: true, id: item.id, type, method: 'Efectivo COP', amount: pending, maxAmount: pending });
-    };
-
-    return (
-      <div className="p-4 space-y-4 animate-in fade-in duration-300">
-        <div className="flex bg-zinc-900 p-1 rounded-xl border border-zinc-800">
-          <button onClick={()=>setBalanceSubTab('general')} className={`flex-1 py-2 text-[10px] font-bold rounded-lg transition-all ${balanceSubTab==='general'?'bg-zinc-800 text-yellow-400':'text-zinc-500'}`}>RESUMEN</button>
-          <button onClick={()=>setBalanceSubTab('analytics')} className={`flex-1 py-2 text-[10px] font-bold rounded-lg transition-all ${balanceSubTab==='analytics'?'bg-zinc-800 text-yellow-400':'text-zinc-500'}`}>ESTADÍSTICAS PRO</button>
-        </div>
-
-        {balanceSubTab === 'general' ? (
-          <>
-            {/* ALERTAS DE STOCK */}
-            {(supplies.bolsas_kraft <= supplies.alerta_umbral || supplies.bolsas_granel <= supplies.alerta_umbral || supplies.etiquetas <= supplies.alerta_umbral) && (
-              <div className="bg-red-900/20 border border-red-500/50 p-4 rounded-2xl flex items-center gap-3">
-                <AlertTriangle className="text-red-500 animate-pulse" size={24}/>
-                <div>
-                  <p className="text-xs font-black text-red-500 uppercase">¡Alerta de Insumos!</p>
-                  <p className="text-[10px] text-zinc-400">
-                    {supplies.bolsas_kraft <= supplies.alerta_umbral && `Bolsas Kraft (${supplies.bolsas_kraft}) `}
-                    {supplies.bolsas_granel <= supplies.alerta_umbral && `Bolsas Granel (${supplies.bolsas_granel}) `}
-                    {supplies.etiquetas <= supplies.alerta_umbral && `Etiquetas (${supplies.etiquetas}) `}
-                    bajas.
-                  </p>
-                </div>
-              </div>
-            )}
-
-            {/* GRÁFICO TENDENCIAS */}
-            <div className="bg-zinc-900 rounded-2xl p-5 shadow-xl border border-zinc-800">
-              <h3 className="text-[10px] font-bold text-yellow-400 uppercase tracking-widest mb-4 flex items-center justify-between">
-                <span className="flex items-center gap-1"><BarChart3 size={14}/>Tendencia {showUSD ? '(USD)' : '(COP)'}</span>
-                <div className="flex gap-1 bg-zinc-950 p-0.5 rounded">
-                  <button onClick={()=>setChartRange('7D')} className={`px-2 py-0.5 rounded text-[8px] ${chartRange==='7D'?'bg-zinc-800 text-yellow-400':'text-zinc-500'}`}>7D</button>
-                  <button onClick={()=>setChartRange('30D')} className={`px-2 py-0.5 rounded text-[8px] ${chartRange==='30D'?'bg-zinc-800 text-yellow-400':'text-zinc-500'}`}>30D</button>
-                  <button onClick={()=>setChartRange('1A')} className={`px-2 py-0.5 rounded text-[8px] ${chartRange==='1A'?'bg-zinc-800 text-yellow-400':'text-zinc-500'}`}>1A</button>
-                </div>
-              </h3>
-              <div className="flex items-end justify-between h-28 gap-1 overflow-x-auto no-scrollbar pb-2">
-                {chartData.map((data,i)=>{
-                  const h=(data.total/maxChart)*100;
-                  return (
-                    <div key={i} className="flex flex-col items-center flex-1 min-w-[20px] group">
-                      <div className="text-[8px] text-zinc-400 mb-1 opacity-0 group-hover:opacity-100 transition-opacity absolute -mt-4">{showUSD ? `$${(data.total/rates.usd_cop).toFixed(0)}` : `$${Math.round(data.total/1000)}k`}</div>
-                      <div className="w-full bg-yellow-400/20 rounded-t-sm" style={{height:'80px',display:'flex',alignItems:'flex-end'}}>
-                        <div className="w-full bg-yellow-400 rounded-t-sm transition-all duration-500" style={{height:`${h}%`,minHeight:data.total>0?'4px':'0px'}}/>
-                      </div>
-                      <div className="text-[8px] text-zinc-500 mt-1 font-bold truncate max-w-full">{data.label}</div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* PnL CARD */}
-            <div className="bg-zinc-900 rounded-2xl p-6 shadow-xl border border-zinc-800 relative overflow-hidden">
-              <TrendingUp size={100} className="absolute -bottom-4 -right-4 text-yellow-400 opacity-5"/>
-              <p className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest">Balance Neto — {showUSD ? 'USD' : 'COP'}</p>
-              <div className={`text-4xl font-black mt-1 ${netPnL>=0?'text-white':'text-red-400'}`}>{fmt(netPnL)}</div>
-              <div className="grid grid-cols-3 gap-2 border-t border-zinc-800 pt-3 mt-3">
-                <div><p className="text-[8px] text-zinc-500 uppercase">Ingresos</p><p className="font-bold text-green-400 text-xs">+{fmt(ingresosCOP)}</p></div>
-                <div><p className="text-[8px] text-zinc-500 uppercase">Compras MP</p><p className="font-bold text-red-400 text-xs">-{fmt(comprasMPCOP)}</p></div>
-                <div><p className="text-[8px] text-zinc-500 uppercase">OPEX</p><p className="font-bold text-orange-400 text-xs">-{fmt(opexCOP)}</p></div>
-              </div>
-              <div className="grid grid-cols-2 gap-2 border-t border-zinc-800 pt-3 mt-3">
-                <div><p className="text-[8px] text-zinc-500 uppercase flex items-center gap-1"><Target size={10}/>Ticket Prom.</p><p className="font-bold text-yellow-400 text-xs">{fmt(ticketPromedio)}</p></div>
-                <div><p className="text-[8px] text-zinc-500 uppercase flex items-center gap-1"><PieChart size={10}/>Total Ventas</p><p className="font-bold text-green-400 text-xs">+{fmt(sales.reduce((a,b)=>a+(b.cop||0),0))}</p></div>
-              </div>
-              <div className="mt-3 pt-3 border-t border-zinc-800 flex justify-between items-center">
-                <p className="text-[8px] text-zinc-500 uppercase flex items-center gap-1"><Coffee size={10}/>Donaciones</p>
-                <p className="font-bold text-blue-400 text-xs">{donationsCount} veces ({kgDonated.toFixed(1)}kg)</p>
-              </div>
-            </div>
-
-            {/* CXC / CXP */}
-            <div className="grid grid-cols-2 gap-4">
-              <div className="bg-zinc-900 border border-orange-500/30 rounded-xl p-4">
-                <h3 className="text-[10px] font-bold text-orange-400 uppercase tracking-widest mb-2 flex items-center gap-1"><ArrowRightLeft size={12}/>A COBRAR</h3>
-                <div className="text-xl font-black text-white mb-2">{fmt(cxCobrar.reduce((a,c)=>a+((c.cop||0)-(c.paidAmount||0)),0))}</div>
-                <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
-                  {cxCobrar.length===0 && <p className="text-[10px] text-zinc-600">Sin cuentas pendientes</p>}
-                  {cxCobrar.map(c=>{
-                    const pending=(c.cop||0)-(c.paidAmount||0); const over=isOverdue(c.isoDate);
-                    return (
-                      <div key={c.id} className={`bg-zinc-950 p-2 rounded border flex justify-between items-center ${over?'border-red-900/50':'border-zinc-800'}`}>
-                        <div><p className="text-[10px] font-bold text-zinc-300 truncate w-20 flex items-center gap-1">{over&&<Flag size={8} className="text-red-500"/>}{c.clientName}</p><p className="text-[8px] text-orange-400">{fmt(pending)}</p></div>
-                        <button onClick={()=>markPaid(c,'cxc')} className="text-[8px] bg-green-900/30 text-green-400 px-2 py-1 rounded font-bold">ABONAR</button>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-              <div className="bg-zinc-900 border border-red-500/30 rounded-xl p-4">
-                <h3 className="text-[10px] font-bold text-red-400 uppercase tracking-widest mb-2 flex items-center gap-1"><BookOpen size={12}/>A PAGAR</h3>
-                <div className="text-xl font-black text-white mb-2">{fmt(cxPagar.reduce((a,p)=>a+((p.cop||0)-(p.paidAmount||0)),0))}</div>
-                <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
-                  {cxPagar.length===0 && <p className="text-[10px] text-zinc-600">Sin deudas pendientes</p>}
-                  {cxPagar.map(p=>{
-                    const pending=(p.cop||0)-(p.paidAmount||0);
-                    return (
-                      <div key={p.id} className="bg-zinc-950 p-2 rounded border border-zinc-800 flex justify-between items-center">
-                        <div><p className="text-[10px] font-bold text-zinc-300 truncate w-20">{p.producer}</p><p className="text-[8px] text-red-400">{fmt(pending)}</p></div>
-                        <button onClick={()=>markPaid(p,'cxp')} className="text-[8px] bg-red-900/30 text-red-400 px-2 py-1 rounded font-bold">ABONAR</button>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-            
-            {/* HISTORIAL VENTAS */}
-            <div>
-              <h3 className="text-xs font-bold text-yellow-400 mb-2 uppercase tracking-wider flex items-center gap-2 mt-4"><List size={14}/>Últimas Ventas</h3>
-              {sales.length===0 && <p className="text-xs text-zinc-600 text-center py-4">Aún no hay ventas registradas</p>}
-              <div className="space-y-2">
-                {sales.slice(0,visibleSales).map(s=>{
-                  const statusText = s.isPaid ? 'Pagado' : (s.paidAmount>0 ? `Abonó $${(s.paidAmount||0).toLocaleString('es-CO')}` : 'Fiado');
-                  return (
-                    <div key={s.id} className="bg-zinc-900 p-3 rounded-xl border border-zinc-800 flex justify-between items-center">
-                      <div><p className="font-bold text-zinc-200 text-xs">{s.quantity||1}x {s.product}</p><p className="text-[9px] text-zinc-500">{s.date} • {s.clientName} • {statusText}</p></div>
-                      <div className="flex items-center gap-2">
-                        <span className={`font-black text-sm ${s.isPaid?'text-green-400':'text-orange-400'}`}>+{fmt(s.cop||0)}</span>
-                        <button onClick={()=>openInvoice(s)} className="text-yellow-400/50 hover:text-yellow-400"><Share2 size={15}/></button>
-                        <button onClick={()=>setEditingSale(s)} className="text-zinc-700 hover:text-yellow-400"><Edit3 size={13}/></button>
-                        <button onClick={()=>deleteSale(s.id)} className="text-zinc-700 hover:text-red-500"><Trash2 size={13}/></button>
-                      </div>
-                    </div>
-                  );
-                })}
-                {sales.length>visibleSales && <button onClick={()=>setVisibleSales(p=>p+10)} className="w-full text-xs font-bold text-zinc-500 py-2 border border-dashed border-zinc-800 rounded-lg hover:text-yellow-400 hover:border-yellow-400/30">CARGAR MÁS ({sales.length-visibleSales} restantes)</button>}
-              </div>
-            </div>
-          </>
-        ) : (
-          <div className="space-y-4">
-            {/* PRODUCER QUALITY */}
-            <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
-              <h3 className="text-xs font-bold text-yellow-400 mb-3 uppercase tracking-widest flex items-center justify-between">
-                <span>Calidad por Productor</span>
-                <button onClick={()=>exportToCSV(producers.map(p=>{
-                  const n=typeof p==='string'?p:p.name;
-                  const logs=processHistory.filter(l=>l.producer===n);
-                  const totalIn=logs.reduce((a,b)=>a+b.input,0);
-                  const totalOut=logs.reduce((a,b)=>a+b.output,0);
-                  const avgMerma=totalIn>0?((totalIn-totalOut)/totalIn*100).toFixed(1):0;
-                  return {Productor:n, Entregado:totalIn, Procesado:totalOut, MermaPromedio:avgMerma+'%'};
-                }), 'Calidad_Productores')} className="text-[10px] text-zinc-500 hover:text-white"><Download size={12}/></button>
-              </h3>
-              <div className="space-y-2 max-h-48 overflow-y-auto">
-                {producers.length === 0 ? <p className="text-[10px] text-zinc-600">Sin datos de fábrica aún.</p> : producers.map(p=>{
-                  const n=typeof p==='string'?p:p.name;
-                  const logs=processHistory.filter(l=>l.producer===n);
-                  if(logs.length===0) return null;
-                  const totalIn=logs.reduce((a,b)=>a+b.input,0);
-                  const totalOut=logs.reduce((a,b)=>a+b.output,0);
-                  const avgMerma=totalIn>0?((totalIn-totalOut)/totalIn*100).toFixed(1):0;
-                  return (
-                    <div key={n} className="bg-zinc-950 p-2 rounded border border-zinc-800 flex justify-between items-center text-[10px]">
-                      <div><p className="font-bold text-white">{n}</p><p className="text-zinc-500">{totalIn}kg ➔ {totalOut}kg</p></div>
-                      <div className={`font-black ${parseFloat(avgMerma)>22?'text-red-400':'text-green-400'}`}>{avgMerma}% merma</div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* TOP BUYERS */}
-            <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
-              <h3 className="text-xs font-bold text-green-400 mb-3 uppercase tracking-widest flex items-center justify-between">
-                <span>Mayores Compradores</span>
-                <button onClick={()=>exportToCSV(clients.map(c=>{
-                  const s=sales.filter(sl=>sl.clientName===c.fullName);
-                  const total=s.reduce((a,b)=>a+b.cop,0);
-                  const kgs=s.reduce((a,b)=>a+(b.kgSold*b.quantity),0);
-                  return {Cliente:c.fullName, TotalCOP:total, Kilos:kgs, Visitas:s.length};
-                }), 'Mayores_Compradores')} className="text-[10px] text-zinc-500 hover:text-white"><Download size={12}/></button>
-              </h3>
-              <div className="space-y-2 max-h-48 overflow-y-auto">
-                {clients.length === 0 ? <p className="text-[10px] text-zinc-600">Sin ventas registradas aún.</p> : clients
-                  .map(c => {
-                    const s=sales.filter(sl=>sl.clientName===c.fullName);
-                    const total=s.reduce((a,b)=>a+b.cop,0);
-                    const kgs=s.reduce((a,b)=>a+(b.kgSold*b.quantity),0);
-                    return { ...c, totalSales: total, totalKgs: kgs, visits: s.length };
-                  })
-                  .filter(c => c.visits > 0)
-                  .sort((a,b) => b.totalSales - a.totalSales)
-                  .map(c=>(
-                    <div key={c.id} className="bg-zinc-950 p-2 rounded border border-zinc-800 flex justify-between items-center text-[10px]">
-                      <div><p className="font-bold text-white">{c.fullName}</p><p className="text-zinc-500">{c.visits} compras • {c.totalKgs.toFixed(1)}kg</p></div>
-                      <div className="font-black text-green-400">${c.totalSales.toLocaleString('es-CO')}</div>
-                    </div>
-                  ))}
-              </div>
-            </div>
-
-            {/* CONVERSION HISTORY */}
-            <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
-              <h3 className="text-xs font-bold text-blue-400 mb-3 uppercase tracking-widest flex items-center justify-between">
-                <span>Historial de Conversión</span>
-                <button onClick={()=>exportToCSV(processHistory, 'Historial_Procesos')} className="text-[10px] text-zinc-500 hover:text-white"><Download size={12}/></button>
-              </h3>
-              <div className="space-y-3">
-                <div className="flex gap-2">
-                   <div className="flex-1 bg-zinc-950 p-3 rounded-lg text-center border border-zinc-800">
-                     <p className="text-[8px] text-zinc-500 uppercase">Trillado Total</p>
-                     <p className="text-sm font-black text-white">{round2(processHistory.filter(l=>l.type==='trilla').reduce((a,b)=>a+b.input,0))}kg</p>
-                   </div>
-                   <div className="flex-1 bg-zinc-950 p-3 rounded-lg text-center border border-zinc-800">
-                     <p className="text-[8px] text-zinc-500 uppercase">Tostado Total</p>
-                     <p className="text-sm font-black text-white">{round2(processHistory.filter(l=>l.type==='tueste').reduce((a,b)=>a+b.output,0))}kg</p>
-                   </div>
-                </div>
-                <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-800 flex justify-between items-center">
-                  <span className="text-[10px] font-bold text-zinc-400">Merma Promedio General:</span>
-                  <span className="text-sm font-black text-white">
-                    {processHistory.length > 0 ? (processHistory.reduce((acc, l) => acc + parseFloat(l.merma), 0) / processHistory.length).toFixed(1) : 0}%
-                  </span>
-                </div>
-              </div>
-            </div>
-            
-            {/* EXPORT ALL DATA */}
-            <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
-              <h3 className="text-xs font-bold text-zinc-400 mb-3 uppercase tracking-widest flex items-center gap-2"><Database size={12}/>Reportes Completos (Excel)</h3>
-              <div className="grid grid-cols-2 gap-2">
-                <button onClick={()=>exportToCSV(sales, 'Ventas_Completas')} className="bg-zinc-950 text-white p-2 rounded text-[10px] font-bold border border-zinc-800 hover:border-yellow-400/50">VENTAS.csv</button>
-                <button onClick={()=>exportToCSV(purchases, 'Compras_Completas')} className="bg-zinc-950 text-white p-2 rounded text-[10px] font-bold border border-zinc-800 hover:border-yellow-400/50">COMPRAS.csv</button>
-                <button onClick={()=>exportToCSV(expenses, 'Gastos_Completas')} className="bg-zinc-950 text-white p-2 rounded text-[10px] font-bold border border-zinc-800 hover:border-yellow-400/50">GASTOS.csv</button>
-                <button onClick={()=>exportToCSV(processHistory, 'Procesos_Completas')} className="bg-zinc-950 text-white p-2 rounded text-[10px] font-bold border border-zinc-800 hover:border-yellow-400/50">PROCESOS.csv</button>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  // ============================================================
-  //  MAIN RETURN
-  // ============================================================
   return (
-    <div className="min-h-screen bg-black font-sans text-zinc-100 flex justify-center">
-      <div className="w-full max-w-md bg-zinc-950 min-h-screen shadow-2xl flex flex-col relative border-x border-zinc-900">
-
+    <div className="min-h-screen theme-app font-sans flex justify-center">
+      <div className="w-full max-w-md min-h-screen flex flex-col relative border-x theme-border shadow-2xl">
         {/* HEADER */}
-        <header className="bg-zinc-900 border-b border-yellow-500/30 p-4 flex justify-between items-center z-10 sticky top-0">
-          <div className="flex items-center gap-3">
-            <div className="bg-yellow-400 p-2 rounded-xl shadow-[0_0_15px_rgba(250,204,21,0.3)] relative">
-              {isSyncing && <Database size={12} className="absolute -top-1 -right-1 text-white animate-pulse"/>}
-              <Coffee size={24} className="text-zinc-900"/>
+        <header className="theme-card border-b theme-border px-4 py-3 flex justify-between items-center z-20 sticky top-0 rounded-none">
+          <div className="flex items-center gap-2.5">
+            <div className="theme-accent-bg p-2 rounded-xl shadow relative">
+              {isSyncing && <Database size={11} className="absolute -top-1 -right-1 animate-pulse" />}
+              <Coffee size={22} />
             </div>
             <div>
-              <h1 className="text-xl font-black tracking-widest leading-none text-white">COLADOS</h1>
-              <p className="text-[9px] text-zinc-400 tracking-[0.2em] mt-0.5 font-bold">BY HARVEY CÁRDENAS</p>
-              <p className="text-[9px] text-yellow-400 tracking-[0.2em] font-bold">V7.3 · OFFLINE-FIRST PWA</p>
+              <h1 className="text-lg font-black tracking-widest leading-none">COLADOS</h1>
+              <p className="text-[9px] theme-muted font-bold tracking-wider mt-0.5">
+                V8.0 · GRAMOS & COSTOS
+              </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+
+          <div className="flex items-center gap-1.5">
             <button
-              onClick={() => setShowUSD(v => !v)}
-              className={`px-3 py-1.5 rounded-lg text-[10px] font-black border transition-all ${
-                showUSD
-                  ? 'bg-blue-500 text-white border-blue-400 shadow-lg shadow-blue-500/20'
-                  : 'bg-zinc-800 text-yellow-400 border-zinc-700 hover:border-yellow-400/50'
-              }`}
+              type="button"
+              onClick={() =>
+                updateState((prev) => ({
+                  ...prev,
+                  theme: prev.theme === 'dark' ? 'light' : 'dark',
+                }))
+              }
+              className="theme-subtle p-2 rounded-full"
+              title="Cambiar tema Claro / Oscuro"
             >
-              {showUSD ? '🇺🇸 USD' : '🇨🇴 COP'}
+              {appState.theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
             </button>
-            <button onClick={()=>setShowSettings(true)} className="p-2 text-zinc-400 hover:text-yellow-400 bg-zinc-800 rounded-full transition-colors"><Settings size={20}/></button>
+            <button
+              type="button"
+              onClick={cycleDisplayCurrency}
+              className="theme-accent-soft px-2.5 py-1.5 rounded-xl text-[10px] font-black"
+              title="Cambiar moneda de visualización"
+            >
+              {currencyLabel}
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowSettings(true)}
+              className="theme-subtle p-2 rounded-full"
+              title="Configuración"
+            >
+              <Settings size={17} />
+            </button>
           </div>
         </header>
 
-        {/* ALERTA PEDIDOS */}
-        {orders.length>0 && activeTab!=='ventas' && (
-          <div onClick={()=>{setActiveTab('ventas');setVTab('pedidos');}} className="bg-yellow-400 text-zinc-900 px-4 py-2 text-[10px] font-black uppercase tracking-widest flex justify-between items-center cursor-pointer z-10">
-            <span className="flex items-center gap-2"><Bell size={13} className="animate-bounce"/>¡{orders.length} pedido{orders.length>1?'s':''} pendiente{orders.length>1?'s':''}!</span>
-            <span className="underline">Revisar →</span>
+        {/* Banner de migración V6 -> V8 (solo Clientes y Productores) */}
+        {migrationBanner && (
+          <div className="theme-info-soft px-4 py-2.5 text-[11px] font-bold flex justify-between items-center gap-2 border-b theme-border">
+            <span>{migrationBanner}</span>
+            <button
+              type="button"
+              onClick={() => setMigrationBanner(null)}
+              className="p-1 shrink-0"
+            >
+              <X size={14} />
+            </button>
           </div>
         )}
 
-        <main className="flex-1 overflow-y-auto pb-24 bg-zinc-950">
-          {activeTab==='ventas'  && renderVentas()}
-          {activeTab==='compras' && renderCompras()}
-          {activeTab==='fabrica' && renderFabrica()}
-          {activeTab==='balance' && renderBalance()}
+        {/* Alerta de pedidos pendientes */}
+        {appState.orders.length > 0 && activeTab !== 'ventas' && (
+          <button
+            type="button"
+            onClick={() => setActiveTab('ventas')}
+            className="theme-accent-bg px-4 py-2 text-[10px] font-black uppercase tracking-widest flex justify-between items-center"
+          >
+            <span className="flex items-center gap-1.5">
+              <Bell size={13} className="animate-bounce" />
+              ¡{appState.orders.length} pedido{appState.orders.length > 1 ? 's' : ''} pendiente{appState.orders.length > 1 ? 's' : ''}!
+            </span>
+            <span className="underline">Ir a Ventas →</span>
+          </button>
+        )}
+
+        {/* CONTENIDO PRINCIPAL */}
+        <main
+          onScroll={handleMainScroll}
+          className="flex-1 overflow-y-auto scroll-smooth-android"
+        >
+          {activeTab === 'ventas' && (
+            <VentasTab
+              state={appState}
+              onUpdateRates={(rates) => updateState((prev) => ({ ...prev, rates }))}
+              onRegisterSale={handleRegisterSale}
+              onCreateOrder={handleCreateOrder}
+              onDeleteOrder={handleDeleteOrder}
+              isKeyboardOpen={isKeyboardOpen}
+              isBottomSheetMinimized={isBottomSheetMinimized}
+              onToggleBottomSheet={() => setIsBottomSheetMinimized((v) => !v)}
+              onNotify={showToast}
+            />
+          )}
+
+          {activeTab === 'compras' && (
+            <ComprasTab
+              state={appState}
+              onAddPurchase={handleAddPurchase}
+              onDeletePurchase={handleDeletePurchase}
+              onAddExpense={handleAddExpense}
+              onDeleteExpense={handleDeleteExpense}
+              onNotify={showToast}
+            />
+          )}
+
+          {activeTab === 'fabrica' && (
+            <FabricaTab
+              state={appState}
+              onCompleteProcess={handleCompleteProcess}
+              onSaveActiveProcess={handleSaveActiveProcess}
+              onResumeActiveProcess={handleResumeActiveProcess}
+              onCancelActiveProcess={handleCancelActiveProcess}
+              onEditLog={setEditingLog}
+              onDeleteLog={handleDeleteLog}
+              onNotify={showToast}
+            />
+          )}
+
+          {activeTab === 'balance' && (
+            <BalanceTab
+              state={appState}
+              costing={costing}
+              onOpenReceipt={({ sale = null, statement = null }) =>
+                setReceiptModal({ isOpen: true, sale, statement })
+              }
+              onOpenPayment={(payload) => setPaymentModal({ isOpen: true, ...payload })}
+              onEditSale={setEditingSale}
+              onDeleteSale={handleDeleteSale}
+              onPayPurchase={(p) =>
+                setPaymentModal({
+                  isOpen: true,
+                  mode: 'cxp_single',
+                  purchase: p,
+                  maxCop: roundCop(p.balanceDueCop ?? p.cop),
+                  initialAmountCop: roundCop(p.balanceDueCop ?? p.cop),
+                })
+              }
+              onUpdateCostConfig={(patch) =>
+                updateState((prev) => ({
+                  ...prev,
+                  costConfig: { ...prev.costConfig, ...patch },
+                }))
+              }
+              onUpdateCatalogPrice={(itemId, suggestedPriceCop) => {
+                updateState((prev) => ({
+                  ...prev,
+                  catalog: prev.catalog.map((c) =>
+                    c.id === itemId ? { ...c, priceCop: suggestedPriceCop } : c
+                  ),
+                }));
+                showToast('✅ Precio de catálogo actualizado');
+              }}
+              onExportCsv={handleExportCsv}
+            />
+          )}
         </main>
 
-        {/* TAB BAR */}
-        <nav className="bg-zinc-950 border-t border-zinc-900 flex justify-around p-2 absolute bottom-0 w-full z-10" style={{paddingBottom:'max(0.5rem, env(safe-area-inset-bottom))'}}>
-          {[{tab:'ventas',icon:<DollarSign size={22} strokeWidth={2.5}/>,label:'Ventas'},{tab:'compras',icon:<ShoppingCart size={22} strokeWidth={2.5}/>,label:'Compras'},{tab:'fabrica',icon:<Factory size={22} strokeWidth={2.5}/>,label:'Proceso'},{tab:'balance',icon:<Wallet size={22} strokeWidth={2.5}/>,label:'Balance'}].map(({tab,icon,label})=>(
-            <button key={tab} onClick={()=>setActiveTab(tab)} className={`flex flex-col items-center gap-1 w-16 transition-all duration-200 ${activeTab===tab?'text-yellow-400 -translate-y-1':'text-zinc-600'}`}>
-              <div className={`p-1.5 rounded-xl ${activeTab===tab?'bg-yellow-400/10':''}`}>{icon}</div>
-              <span className="text-[8px] font-bold tracking-wider uppercase">{label}</span>
-            </button>
-          ))}
-        </nav>
-
-        {/* MODAL CONFIGURACIÓN */}
-        {showSettings && (
-          <div className="fixed inset-0 bg-black/95 z-50 overflow-y-auto p-4 pb-20 animate-in slide-in-from-bottom">
-            <div className="flex justify-between items-center mb-6 mt-4">
-              <h2 className="text-lg font-black text-white tracking-widest flex items-center gap-2"><Settings size={20} className="text-yellow-400"/>CONFIGURACIÓN</h2>
-              <button onClick={()=>setShowSettings(false)} className="bg-zinc-800 p-2 rounded-full text-white"><X size={20}/></button>
-            </div>
-            <div className="space-y-6">
-              <div className="bg-zinc-900 p-4 rounded-xl border border-yellow-400/50">
-                <h3 className="text-sm font-bold text-yellow-400 mb-2 flex items-center gap-2"><Database size={16}/>Respaldo Offline</h3>
-                <p className="text-[10px] text-zinc-400 mb-4">Tu información vive en este dispositivo. Exporta un respaldo regularmente.</p>
-                <div className="flex gap-3 mb-2">
-                  <button onClick={exportData} className="flex-1 bg-zinc-800 text-yellow-400 p-3 rounded-lg text-[10px] font-black border border-yellow-400/30 flex justify-center items-center gap-1"><Download size={14}/>EXPORTAR</button>
-                  <label className="flex-1 bg-yellow-400 text-zinc-900 p-3 rounded-lg text-[10px] font-black flex justify-center items-center gap-1 cursor-pointer"><Save size={14}/>IMPORTAR<input type="file" accept=".json" className="hidden" onChange={importData}/></label>
-                </div>
-                <button onClick={()=>{
-                  const inv = repairData({purchases, processHistory, sales});
-                  setInventory(inv);
-                  guardarLocal({inventory: inv});
-                  showToast('¡Datos re-calculados y adaptados con éxito!');
-                }} className="w-full bg-blue-500/20 text-blue-400 hover:bg-blue-500 hover:text-white p-3 rounded-lg text-[10px] font-black border border-blue-500/30 flex justify-center items-center gap-1 transition-colors">🛠️ ADAPTAR / REPARAR DATOS (v7.4)</button>
-              </div>
-              <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
-                <h3 className="text-sm font-bold text-yellow-400 mb-3 flex items-center gap-2"><Package size={16}/>Precios ($)</h3>
-                {catalog.map(p=>(
-                  <div key={p.id} className="flex justify-between items-center border-b border-zinc-800 py-2 last:border-0">
-                    <span className="text-sm text-zinc-300">{p.name}</span>
-                    {editingCatId===p.id?(
-                      <div className="flex gap-2"><input type="number" step="0.01" value={editPrice} onChange={e=>setEditPrice(e.target.value)} className="w-16 bg-zinc-950 text-white border border-yellow-400 rounded px-1 text-sm text-center font-bold outline-none"/><button onClick={()=>{if(!editPrice)return;const nC=catalog.map(x=>x.id===p.id?{...x,price:parseFloat(editPrice)}:x);setCatalog(nC);guardarLocal({catalog:nC});setEditingCatId(null);setEditPrice('');}} className="bg-yellow-400 text-black px-3 rounded text-xs font-bold">✔</button></div>
-                    ):(
-                      <div className="flex items-center gap-3"><span className="text-sm font-bold text-white">${p.price}</span><button onClick={()=>{setEditingCatId(p.id);setEditPrice(p.price);}} className="text-zinc-500 hover:text-yellow-400"><Edit3 size={14}/></button></div>
-                    )}
+        {/* NAVEGACIÓN INFERIOR (se oculta al abrir teclado móvil para no estorbar) */}
+        {!isKeyboardOpen && (
+          <nav className="theme-nav flex justify-around px-2 pt-1.5 pb-safe fixed bottom-0 w-full max-w-md z-30">
+            {[
+              { tab: 'ventas', icon: <DollarSign size={20} strokeWidth={2.5} />, label: 'Ventas' },
+              { tab: 'compras', icon: <ShoppingCart size={20} strokeWidth={2.5} />, label: 'Compras' },
+              { tab: 'fabrica', icon: <Factory size={20} strokeWidth={2.5} />, label: 'Proceso' },
+              { tab: 'balance', icon: <Wallet size={20} strokeWidth={2.5} />, label: 'Balance' },
+            ].map(({ tab, icon, label }) => {
+              const active = activeTab === tab;
+              return (
+                <button
+                  key={tab}
+                  type="button"
+                  onClick={() => setActiveTab(tab)}
+                  className={`flex flex-col items-center gap-0.5 w-16 transition-all ${
+                    active ? 'theme-accent-text -translate-y-0.5' : 'theme-muted'
+                  }`}
+                >
+                  <div className={`p-1.5 rounded-xl ${active ? 'theme-accent-soft border-0' : ''}`}>
+                    {icon}
                   </div>
-                ))}
-              </div>
-              <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
-                <h3 className="text-sm font-bold text-yellow-400 mb-3 flex items-center gap-2"><Package size={16}/>Insumos Rápidos</h3>
-                <div className="grid grid-cols-3 gap-2">
-                  <div className="flex flex-col"><label className="text-[9px] text-zinc-500 uppercase">Bolsas Kraft</label><input type="number" value={supplies.bolsas_kraft} onChange={e=>{const ns={...supplies,bolsas_kraft:parseInt(e.target.value)||0}; setSupplies(ns); guardarLocal({supplies:ns});}} className="p-2 bg-zinc-950 border border-zinc-800 rounded text-white font-bold text-sm text-center"/></div>
-                  <div className="flex flex-col"><label className="text-[9px] text-zinc-500 uppercase">Bolsas Granel</label><input type="number" value={supplies.bolsas_granel} onChange={e=>{const ns={...supplies,bolsas_granel:parseInt(e.target.value)||0}; setSupplies(ns); guardarLocal({supplies:ns});}} className="p-2 bg-zinc-950 border border-zinc-800 rounded text-white font-bold text-sm text-center"/></div>
-                  <div className="flex flex-col"><label className="text-[9px] text-zinc-500 uppercase">Etiquetas</label><input type="number" value={supplies.etiquetas||0} onChange={e=>{const ns={...supplies,etiquetas:parseInt(e.target.value)||0}; setSupplies(ns); guardarLocal({supplies:ns});}} className="p-2 bg-zinc-950 border border-zinc-800 rounded text-white font-bold text-sm text-center"/></div>
-                </div>
-              </div>
-              <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
-                <h3 className="text-sm font-bold text-yellow-400 mb-3 flex items-center gap-2"><UserCheck size={16}/>Clientes</h3>
-                {!showNewClientForm?(
-                  <><button onClick={()=>setShowNewClientForm(true)} className="w-full mb-3 bg-zinc-800 text-yellow-400 text-xs font-bold p-3 rounded-lg border border-yellow-400/30 flex justify-center items-center gap-2"><Plus size={14}/>NUEVO CLIENTE</button>
-                  <input type="text" placeholder="Buscar cliente..." value={filterClient} onChange={e=>setFilterClient(e.target.value)} className="w-full mb-3 p-2 bg-zinc-950 border border-zinc-800 rounded text-xs text-white outline-none focus:border-yellow-400/50"/>
-                  <div className="space-y-2 max-h-48 overflow-y-auto">
-                    {clients.length===0?<p className="text-xs text-zinc-600">Sin clientes aún.</p>:clients
-                      .filter(c => c.fullName.toLowerCase().includes(filterClient.toLowerCase()) || (c.business && c.business.toLowerCase().includes(filterClient.toLowerCase())))
-                      .sort((a,b) => a.fullName.localeCompare(b.fullName))
-                      .map(c=>{
-                      const t=sales.filter(s=>s.clientName===c.fullName).reduce((a,b)=>a+b.cop,0);
-                      return(
-                        <div key={c.id} className="bg-zinc-950 p-2 rounded-lg border border-zinc-800 flex justify-between items-center">
-                          <div>
-                            <p className="font-bold text-white text-xs">{c.fullName}</p>
-                            <p className="text-[9px] text-zinc-400">{c.business && `${c.business} • `}{c.sector} {c.phone && `• ${c.phone}`}</p>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <p className="text-xs font-black text-yellow-400 mr-1">${t.toLocaleString('es-CO')}</p>
-                            <button onClick={()=>{setNewClientData(c);setShowNewClientForm(true);}} className="text-zinc-600 hover:text-yellow-400"><Edit3 size={12}/></button>
-                            <button onClick={()=>{const n=clients.filter(x=>x.id!==c.id);setClients(n);guardarLocal({clients:n});showToast('Cliente eliminado');}} className="text-zinc-800 hover:text-red-500"><Trash2 size={12}/></button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div></>
-                ):(
-                  <form onSubmit={e=>{
-                    e.preventDefault();
-                    if(!newClientData.fullName)return;
-                    let nl;
-                    if(newClientData.id){
-                      nl = clients.map(x=>x.id===newClientData.id?newClientData:x);
-                    } else {
-                      nl = [{id:Date.now(),...newClientData}, ...clients];
-                    }
-                    setClients(nl); guardarLocal({clients:nl});
-                    setNewClientData({fullName:'',business:'',sector:'',phone:''});
-                    setShowNewClientForm(false); showToast(newClientData.id?'Cliente actualizado':'Cliente registrado');
-                  }} className="space-y-2">
-                    <input type="text" placeholder="Nombre *" required value={newClientData.fullName} onChange={e=>setNewClientData({...newClientData,fullName:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
-                    <input type="text" placeholder="Empresa/Local" value={newClientData.business} onChange={e=>setNewClientData({...newClientData,business:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
-                    <input type="text" placeholder="Sector *" required value={newClientData.sector} onChange={e=>setNewClientData({...newClientData,sector:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
-                    <input type="text" placeholder="Teléfono" value={newClientData.phone} onChange={e=>setNewClientData({...newClientData,phone:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
-                    <div className="flex gap-2"><button type="button" onClick={()=>{setShowNewClientForm(false);setNewClientData({fullName:'',business:'',sector:'',phone:''});}} className="flex-1 bg-zinc-800 text-white p-2 rounded text-xs font-bold">CANCELAR</button><button type="submit" className="flex-1 bg-yellow-400 text-black p-2 rounded text-xs font-bold">GUARDAR</button></div>
-                  </form>
-                )}
-              </div>
-              <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
-                <h3 className="text-sm font-bold text-yellow-400 mb-3 flex items-center gap-2"><Flame size={16}/>Productores</h3>
-                {!showNewProducerForm?(
-                  <><button onClick={()=>setShowNewProducerForm(true)} className="w-full mb-3 bg-zinc-800 text-yellow-400 text-xs font-bold p-3 rounded-lg border border-yellow-400/30 flex justify-center items-center gap-2"><Plus size={14}/>NUEVO PRODUCTOR</button>
-                  <input type="text" placeholder="Buscar productor..." value={filterProducer} onChange={e=>setFilterProducer(e.target.value)} className="w-full mb-3 p-2 bg-zinc-950 border border-zinc-800 rounded text-xs text-white outline-none focus:border-yellow-400/50"/>
-                  <div className="space-y-2 max-h-48 overflow-y-auto">
-                    {producers.length===0?<p className="text-xs text-zinc-600">Sin productores aún.</p>:producers
-                      .filter(p => {
-                        const n=typeof p==='string'?p:p.name;
-                        const f=typeof p==='string'?'':p.finca;
-                        const s=typeof p==='string'?'':p.sector;
-                        return n.toLowerCase().includes(filterProducer.toLowerCase()) || f.toLowerCase().includes(filterProducer.toLowerCase()) || (s && s.toLowerCase().includes(filterProducer.toLowerCase()));
-                      })
-                      .sort((a,b) => {
-                        const nA=typeof a==='string'?a:a.name;
-                        const nB=typeof b==='string'?b:b.name;
-                        return nA.localeCompare(nB);
-                      })
-                      .map(p=>{
-                      const n=typeof p==='string'?p:p.name;
-                      const f=typeof p==='string'?'':p.finca;
-                      return(
-                        <div key={typeof p==='string'?p:p.id} className="bg-zinc-950 p-2 rounded-lg border border-zinc-800 flex justify-between items-center">
-                          <div><p className="font-bold text-white text-xs">{n}</p><p className="text-[9px] text-zinc-400">{f} {p.sector && `• ${p.sector}`} {p.phone && `• ${p.phone}`}</p></div>
-                          <div className="flex gap-2">
-                            <button onClick={()=>{setNewProducerData(p);setShowNewProducerForm(true);}} className="text-zinc-600 hover:text-yellow-400"><Edit3 size={12}/></button>
-                            <button onClick={()=>{const n=producers.filter(x=>x.id!==p.id);setProducers(n);guardarLocal({producers:n});showToast('Productor eliminado');}} className="text-zinc-800 hover:text-red-500"><Trash2 size={12}/></button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div></>
-                ):(
-                  <form onSubmit={e=>{
-                    e.preventDefault();
-                    if(!newProducerData.name)return;
-                    let nl;
-                    if(newProducerData.id){
-                      nl = producers.map(x=>x.id===newProducerData.id?newProducerData:x);
-                    } else {
-                      nl = [{id:Date.now(),...newProducerData}, ...producers];
-                    }
-                    setProducers(nl); guardarLocal({producers:nl});
-                    setNewProducerData({name:'',finca:'',sector:'',phone:''});
-                    setShowNewProducerForm(false); showToast(newProducerData.id?'Productor actualizado':'Productor registrado');
-                  }} className="space-y-2">
-                    <input type="text" placeholder="Nombre *" required value={newProducerData.name} onChange={e=>setNewProducerData({...newProducerData,name:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
-                    <input type="text" placeholder="Finca/Hacienda" value={newProducerData.finca} onChange={e=>setNewProducerData({...newProducerData,finca:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
-                    <input type="text" placeholder="Sector *" required value={newProducerData.sector} onChange={e=>setNewProducerData({...newProducerData,sector:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
-                    <input type="text" placeholder="Teléfono" value={newProducerData.phone} onChange={e=>setNewProducerData({...newProducerData,phone:e.target.value})} className="w-full p-2 bg-zinc-950 border border-zinc-700 focus:border-yellow-400 outline-none rounded text-sm text-white"/>
-                    <div className="flex gap-2"><button type="button" onClick={()=>{setShowNewProducerForm(false);setNewProducerData({name:'',finca:'',sector:'',phone:''});}} className="flex-1 bg-zinc-800 text-white p-2 rounded text-xs font-bold">CANCELAR</button><button type="submit" className="flex-1 bg-yellow-400 text-black p-2 rounded text-xs font-bold">GUARDAR</button></div>
-                  </form>
-                )}
-              </div>
-
-              <div className="bg-zinc-900 p-4 rounded-xl border border-zinc-800">
-                <h3 className="text-sm font-bold text-blue-400 mb-3 flex items-center gap-2"><Package size={16}/>Inventario de Insumos</h3>
-                <div className="grid grid-cols-2 gap-3 mb-3">
-                  <div className="bg-zinc-950 p-2 rounded-lg border border-zinc-800">
-                    <p className="text-[8px] text-zinc-500 uppercase font-bold">Bolsas Kraft</p>
-                    <input type="number" value={supplies.bolsas_kraft} onChange={e=>{const s={...supplies,bolsas_kraft:parseInt(e.target.value)||0}; setSupplies(s); guardarLocal({supplies:s});}} className="w-full bg-transparent text-white font-black text-lg outline-none"/>
-                  </div>
-                  <div className="bg-zinc-950 p-2 rounded-lg border border-zinc-800">
-                    <p className="text-[8px] text-zinc-500 uppercase font-bold">Bolsas Granel</p>
-                    <input type="number" value={supplies.bolsas_granel} onChange={e=>{const s={...supplies,bolsas_granel:parseInt(e.target.value)||0}; setSupplies(s); guardarLocal({supplies:s});}} className="w-full bg-transparent text-white font-black text-lg outline-none"/>
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-3 mb-3">
-                  <div className="bg-zinc-950 p-2 rounded-lg border border-zinc-800">
-                    <p className="text-[8px] text-zinc-500 uppercase font-bold">Stickers G</p>
-                    <input type="number" value={supplies.stickers_grandes} onChange={e=>{const s={...supplies,stickers_grandes:parseInt(e.target.value)||0}; setSupplies(s); guardarLocal({supplies:s});}} className="w-full bg-transparent text-white font-black text-lg outline-none"/>
-                  </div>
-                  <div className="bg-zinc-950 p-2 rounded-lg border border-zinc-800">
-                    <p className="text-[8px] text-zinc-500 uppercase font-bold">Stickers P</p>
-                    <input type="number" value={supplies.stickers_pequenos} onChange={e=>{const s={...supplies,stickers_pequenos:parseInt(e.target.value)||0}; setSupplies(s); guardarLocal({supplies:s});}} className="w-full bg-transparent text-white font-black text-lg outline-none"/>
-                  </div>
-                </div>
-                <div className="bg-zinc-950 p-2 rounded-lg border border-zinc-800 mb-3">
-                  <p className="text-[8px] text-zinc-500 uppercase font-bold text-center">Etiquetas de Lote</p>
-                  <input type="number" value={supplies.etiquetas} onChange={e=>{const s={...supplies,etiquetas:parseInt(e.target.value)||0}; setSupplies(s); guardarLocal({supplies:s});}} className="w-full bg-transparent text-white font-black text-center text-sm outline-none"/>
-                </div>
-                <div className="bg-zinc-950 p-2 rounded-lg border border-zinc-800">
-                  <p className="text-[8px] text-zinc-500 uppercase font-bold text-center">Umbral de Alerta</p>
-                  <input type="number" value={supplies.alerta_umbral} onChange={e=>{const s={...supplies,alerta_umbral:parseInt(e.target.value)||0}; setSupplies(s); guardarLocal({supplies:s});}} className="w-full bg-transparent text-yellow-400 font-black text-center text-sm outline-none"/>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* MODAL ABONAR */}
-        {promptModal.isOpen && (
-          <div className="fixed inset-0 bg-black/90 z-50 flex items-center justify-center p-4 animate-in fade-in">
-            <div className="bg-zinc-900 border border-zinc-800 p-5 rounded-xl w-full max-w-sm shadow-2xl">
-              <h3 className="text-yellow-400 font-bold mb-1 uppercase text-sm">Registrar Pago</h3>
-              <p className="text-xs text-zinc-400 mb-4">Pendiente: <span className="font-bold text-yellow-400">${Math.round(promptModal.maxAmount).toLocaleString('es-CO')} COP</span></p>
-              <input type="number" step="0.01" max={promptModal.maxAmount} value={promptModal.amount} onChange={e=>setPromptModal({...promptModal,amount:parseFloat(e.target.value)||0})} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white font-bold text-lg mb-3 outline-none focus:border-yellow-400 text-center"/>
-              <select value={promptModal.method} onChange={e=>setPromptModal({...promptModal,method:e.target.value})} className="w-full p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-white font-bold text-sm mb-4 outline-none">
-                {paymentMethods.map(m=><option key={m} value={m}>{m}</option>)}
-              </select>
-              <div className="flex gap-2">
-                <button onClick={()=>setPromptModal({isOpen:false,id:null,type:null,method:'Efectivo COP',amount:0,maxAmount:0})} className="flex-1 bg-zinc-800 text-white p-3 rounded-lg text-xs font-bold">CANCELAR</button>
-                <button onClick={()=>{
-                  const {id,type,method,amount,maxAmount}=promptModal;
-                  const pay=Math.min(isNaN(amount)||amount<=0?0:amount,maxAmount);
-                  if(pay<=0){showToast('Monto inválido');return;}
-                  if(type==='cxc'){const n=sales.map(s=>s.id===id?{...s,paidAmount:(s.paidAmount||0)+pay,isPaid:(s.paidAmount||0)+pay>=(s.cop||0),method}:s);setSales(n);guardarLocal({sales:n});}
-                  else{const n=purchases.map(p=>p.id===id?{...p,paidAmount:(p.paidAmount||0)+pay,isPaid:(p.paidAmount||0)+pay>=(p.cop||0),method}:p);setPurchases(n);guardarLocal({purchases:n});}
-                  setPromptModal({isOpen:false,id:null,type:null,method:'Efectivo COP',amount:0,maxAmount:0});
-                  showToast(pay>=maxAmount?'✅ Deuda liquidada':'✅ Abono registrado');
-                }} className="flex-1 bg-yellow-400 text-black p-3 rounded-lg text-xs font-bold hover:bg-yellow-300">CONFIRMAR</button>
-              </div>
-            </div>
-          </div>
+                  <span className="text-[9px] font-black uppercase tracking-wider">{label}</span>
+                </button>
+              );
+            })}
+          </nav>
         )}
 
         {/* TOAST */}
         {toast && (
-          <div className="fixed top-4 left-1/2 -translate-x-1/2 bg-zinc-800 border border-yellow-400 text-yellow-400 px-4 py-2 rounded-full shadow-lg z-50 text-xs font-bold text-center w-11/12 max-w-sm animate-in slide-in-from-top">
+          <div className="fixed top-16 left-1/2 -translate-x-1/2 theme-card border-2 border-amber-500 px-4 py-2 rounded-full shadow-xl z-50 text-xs font-extrabold text-center max-w-xs animate-in slide-in-from-top">
             {toast}
           </div>
         )}
 
-        {/* MODAL FACTURA */}
-        {invoiceModal.isOpen && invoiceModal.sale && (
-          <div className="fixed inset-0 bg-black/95 z-50 flex flex-col items-center justify-center p-4 animate-in fade-in pb-10">
-            <button onClick={()=>setInvoiceModal({isOpen:false,sale:null})} className="absolute top-6 right-6 text-zinc-400 hover:text-white bg-zinc-800 p-2 rounded-full"><X size={24}/></button>
-            <div className="bg-[#09090b] border-4 border-yellow-400 rounded-2xl w-full max-w-sm p-6 shadow-[0_0_30px_rgba(250,204,21,0.2)]">
-              <div className="flex justify-center mb-4">
-                <div className="w-20 h-20 bg-zinc-950 rounded-full border-2 border-yellow-400 p-1">
-                  <img src={logoBase64} alt="logo" className="w-full h-full rounded-full object-cover"/>
-                </div>
-              </div>
-              <h2 className="text-yellow-400 text-3xl font-black tracking-widest text-center">COLADOS</h2>
-              <p className="text-zinc-400 text-sm italic text-center mb-4">"Con el rico aroma al amanecer"</p>
-              <div className="border-t-2 border-dashed border-zinc-700 my-3"/>
-              <div className="space-y-2 text-sm">
-                <div className="flex justify-between"><span className="text-zinc-400">Recibo:</span><span className="text-white font-bold">#{invoiceModal.sale.invoiceNum || invoiceModal.sale.id.toString().slice(-4)}</span></div>
-                <div className="flex justify-between"><span className="text-zinc-400">Fecha:</span><span className="text-white font-bold">{invoiceModal.sale.date}</span></div>
-                <div className="flex justify-between"><span className="text-zinc-400">Cliente:</span><span className="text-yellow-400 font-bold">{invoiceModal.sale.clientName}</span></div>
-              </div>
-              <div className="border-t-2 border-dashed border-zinc-700 my-3"/>
-              <div className="flex gap-2 text-white font-bold text-lg mb-3"><span>{invoiceModal.sale.quantity||1}x</span><span>{invoiceModal.sale.product}</span></div>
-              <div className="border-t-2 border-dashed border-zinc-700 my-3"/>
-              <div className="flex justify-between items-center mb-1"><span className="text-zinc-400 text-sm">TOTAL:</span><span className="text-green-400 text-2xl font-black">${invoiceModal.sale.cop.toLocaleString('es-CO')}</span></div>
-              <div className="flex justify-between mb-1"><span className="text-zinc-400 text-sm">Ref USD:</span><span className="text-white font-bold">USD {invoiceModal.sale.usd.toFixed(2)}</span></div>
-              <div className="flex justify-between mb-4"><span className="text-zinc-400 text-sm">Ref BS:</span><span className="text-white font-bold">Bs {invoiceModal.sale.bs.toFixed(2)}</span></div>
-              <div className={`w-full py-2 rounded-lg text-center font-bold text-white text-sm ${invoiceModal.sale.isPaid?'bg-green-800':'bg-red-800'}`}>
-                {invoiceModal.sale.method === 'Donación' ? 'DONACIÓN / CORTESÍA' : (invoiceModal.sale.isPaid?`PAGADO (${invoiceModal.sale.method})`:(invoiceModal.sale.paidAmount>0?`ABONO $${invoiceModal.sale.paidAmount.toLocaleString('es-CO')}`:'CRÉDITO PENDIENTE'))}
-              </div>
-              <p className="text-center text-[10px] text-zinc-600 mt-4 font-bold">App hecha por Harvey Cárdenas</p>
-            </div>
-            <div className="flex gap-3 w-full max-w-sm mt-5">
-              <button onClick={()=>shareInvoiceText(invoiceModal.sale)} className="flex-1 bg-zinc-800 border border-yellow-400 text-yellow-400 p-3 rounded-xl font-bold flex items-center justify-center gap-2 text-sm"><Share2 size={16}/>Compartir</button>
-              <button onClick={()=>downloadInvoiceImage(invoiceModal.sale)} className="flex-1 bg-yellow-400 text-zinc-900 p-3 rounded-xl font-black flex items-center justify-center gap-2 text-sm"><Download size={16}/>Guardar</button>
-            </div>
-          </div>
-        )}
+        {/* MODALES */}
+        <SettingsModal
+          isOpen={showSettings}
+          onClose={() => setShowSettings(false)}
+          state={appState}
+          hasLegacyData={boot.hasLegacyData}
+          onSetTheme={(theme) => updateState((prev) => ({ ...prev, theme }))}
+          onUpdateCatalogItem={(id, patch) => {
+            updateState((prev) => ({
+              ...prev,
+              catalog: prev.catalog.map((c) => (c.id === id ? { ...c, ...patch } : c)),
+            }));
+            showToast('✅ Presentación actualizada');
+          }}
+          onAddCatalogItem={(item) => {
+            updateState((prev) => ({
+              ...prev,
+              catalog: [...prev.catalog, { id: Date.now(), ...item }],
+            }));
+            showToast('✅ Presentación agregada');
+          }}
+          onDeleteCatalogItem={(id) => {
+            updateState((prev) => ({
+              ...prev,
+              catalog: prev.catalog.filter((c) => c.id !== id),
+            }));
+            showToast('Presentación eliminada');
+          }}
+          onUpdateSupplies={(supplies) => updateState((prev) => ({ ...prev, supplies }))}
+          onUpdateOpeningInventory={(openingInventoryGrams) => {
+            updateState((prev) => ({
+              ...prev,
+              openingInventoryGrams,
+              inventoryGrams: recomputeInventoryGrams({
+                openingInventoryGrams,
+                purchases: prev.purchases,
+                processHistory: prev.processHistory,
+                activeProcesses: prev.activeProcesses,
+                sales: prev.sales,
+              }),
+            }));
+          }}
+          onRecalculateInventory={() => {
+            updateState((prev) => ({
+              ...prev,
+              inventoryGrams: recomputeInventoryGrams(prev),
+            }));
+            showToast('✅ Inventario recalculado en gramos exactos');
+          }}
+          onSaveClient={(draft) => {
+            updateState((prev) => {
+              const list = draft.id
+                ? prev.clients.map((c) => (c.id === draft.id ? { ...c, ...draft } : c))
+                : [{ id: Date.now(), ...draft }, ...prev.clients];
+              return { ...prev, clients: normalizeClients(list) };
+            });
+            showToast(draft.id ? '✅ Cliente actualizado' : '✅ Cliente registrado');
+          }}
+          onDeleteClient={(id) => {
+            updateState((prev) => ({
+              ...prev,
+              clients: prev.clients.filter((c) => c.id !== id),
+            }));
+            showToast('Cliente eliminado');
+          }}
+          onSaveProducer={(draft) => {
+            updateState((prev) => {
+              const list = draft.id
+                ? prev.producers.map((p) => (p.id === draft.id ? { ...p, ...draft } : p))
+                : [{ id: Date.now(), ...draft }, ...prev.producers];
+              return { ...prev, producers: normalizeProducers(list) };
+            });
+            showToast(draft.id ? '✅ Productor actualizado' : '✅ Productor registrado');
+          }}
+          onDeleteProducer={(id) => {
+            updateState((prev) => ({
+              ...prev,
+              producers: prev.producers.filter((p) => p.id !== id),
+            }));
+            showToast('Productor eliminado');
+          }}
+          onExportV8={handleExportV8}
+          onExportLegacy={handleExportLegacy}
+          onImportJson={handleImportJson}
+        />
 
-        {/* EDIT SALES MODAL */}
-        {editingSale && (
-          <div className="fixed inset-0 bg-black/95 z-50 flex items-center justify-center p-4 animate-in fade-in">
-            <div className="bg-zinc-900 w-full max-w-sm rounded-2xl border border-zinc-800 p-6 space-y-4 shadow-2xl">
-              <div className="flex justify-between items-center">
-                <h3 className="text-white font-black uppercase tracking-widest text-sm flex items-center gap-2"><Edit3 size={18} className="text-yellow-400"/>Editar Venta</h3>
-                <button onClick={()=>setEditingSale(null)} className="text-zinc-500 hover:text-white p-2 bg-zinc-800 rounded-full"><X size={18}/></button>
-              </div>
-              <div className="space-y-3">
-                <div>
-                  <label className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Cliente</label>
-                  <input type="text" value={editingSale.clientName} onChange={e=>setEditingSale({...editingSale, clientName: e.target.value})} className="w-full bg-zinc-950 border border-zinc-800 text-white rounded-lg p-3 text-sm focus:border-yellow-400 outline-none transition-colors"/>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Cantidad</label>
-                    <input type="number" value={editingSale.quantity} onChange={e=>setEditingSale({...editingSale, quantity: parseInt(e.target.value)||0})} className="w-full bg-zinc-950 border border-zinc-800 text-white rounded-lg p-3 text-sm outline-none"/>
-                  </div>
-                  <div>
-                    <label className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Kilos/Unid</label>
-                    <input type="number" step="0.01" value={editingSale.kgSold} onChange={e=>setEditingSale({...editingSale, kgSold: parseFloat(e.target.value)||0})} className="w-full bg-zinc-950 border border-zinc-800 text-white rounded-lg p-3 text-sm outline-none"/>
-                  </div>
-                </div>
-                <div>
-                  <label className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Total COP</label>
-                  <input type="number" value={editingSale.cop} onChange={e=>setEditingSale({...editingSale, cop: parseInt(e.target.value)||0, usd: (parseInt(e.target.value)||0)/rates.cop, bs: ((parseInt(e.target.value)||0)/rates.cop)*rates.bs})} className="w-full bg-zinc-950 border border-zinc-800 text-white rounded-lg p-3 text-sm outline-none"/>
-                </div>
-              </div>
-              <button onClick={()=>updateSale(editingSale)} className="w-full bg-yellow-400 text-zinc-900 font-black p-4 rounded-xl text-sm tracking-widest hover:bg-yellow-300 transition-colors shadow-lg">GUARDAR CAMBIOS</button>
-            </div>
-          </div>
-        )}
+        <ReceiptModal
+          modal={receiptModal}
+          sales={appState.sales}
+          rates={appState.rates}
+          onClose={() => setReceiptModal({ isOpen: false, sale: null, statement: null })}
+          onNotify={showToast}
+        />
 
-        {/* EDIT LOG MODAL */}
-        {editingLog && (
-          <div className="fixed inset-0 bg-black/95 z-50 flex items-center justify-center p-4 animate-in fade-in">
-            <div className="bg-zinc-900 w-full max-w-sm rounded-2xl border border-zinc-800 p-6 space-y-4 shadow-2xl">
-              <div className="flex justify-between items-center">
-                <h3 className="text-white font-black uppercase tracking-widest text-sm flex items-center gap-2"><Factory size={18} className="text-blue-400"/>Editar Lote</h3>
-                <button onClick={()=>setEditingLog(null)} className="text-zinc-500 hover:text-white p-2 bg-zinc-800 rounded-full"><X size={18}/></button>
-              </div>
-              <div className="space-y-3">
-                <div>
-                  <label className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Entrada (Kg)</label>
-                  <input type="number" step="0.01" value={editingLog.input} onChange={e=>{const i=parseFloat(e.target.value)||0; const m=i>0?((i-editingLog.output)/i*100).toFixed(1):0; setEditingLog({...editingLog, input: i, merma: m})}} className="w-full bg-zinc-950 border border-zinc-800 text-white rounded-lg p-3 text-sm outline-none transition-colors focus:border-blue-500"/>
-                </div>
-                <div>
-                  <label className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Salida (Kg)</label>
-                  <input type="number" step="0.01" value={editingLog.output} onChange={e=>{const o=parseFloat(e.target.value)||0; const m=editingLog.input>0?((editingLog.input-o)/editingLog.input*100).toFixed(1):0; setEditingLog({...editingLog, output: o, merma: m})}} className="w-full bg-zinc-950 border border-zinc-800 text-white rounded-lg p-3 text-sm outline-none transition-colors focus:border-blue-500"/>
-                </div>
-                <div className="bg-zinc-950 p-4 rounded-xl border border-zinc-800 flex justify-between items-center">
-                  <span className="text-[10px] text-zinc-500 uppercase font-black tracking-tighter">Nueva Merma Calculada</span>
-                  <span className={`text-xl font-black ${parseFloat(editingLog.merma)>22?'text-red-500':'text-green-400'}`}>{editingLog.merma}%</span>
-                </div>
-              </div>
-              <button onClick={()=>updateLog(editingLog)} className="w-full bg-blue-500 text-white font-black p-4 rounded-xl text-sm tracking-widest hover:bg-blue-400 transition-colors shadow-lg">GUARDAR CAMBIOS</button>
-            </div>
-          </div>
-        )}
+        <PaymentModal
+          modal={paymentModal}
+          rates={appState.rates}
+          onClose={() => setPaymentModal({ isOpen: false })}
+          onConfirm={handleConfirmPayment}
+        />
 
+        <EditSaleModal
+          sale={editingSale}
+          onClose={() => setEditingSale(null)}
+          onSave={handleSaveEditedSale}
+        />
+
+        <EditProcessModal
+          log={editingLog}
+          onClose={() => setEditingLog(null)}
+          onSave={handleSaveEditedLog}
+        />
       </div>
     </div>
   );
